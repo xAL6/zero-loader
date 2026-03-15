@@ -1,4 +1,4 @@
-# claude-loader
+# ai-loader
 
 > **Entire codebase written by [Claude Code](https://claude.ai/code) (Anthropic Claude Opus 4.6)**
 
