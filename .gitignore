@@ -1,0 +1,8 @@
+Payload.h
+data.enc
+*.exe
+*.obj
+*.exp
+*.lib
+*.res
+debug.log
