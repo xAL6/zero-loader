@@ -26,8 +26,7 @@ typedef struct _NT_SYSCALL {
 typedef struct _NTAPI_FUNC {
     NT_SYSCALL  NtAllocateVirtualMemory;
     NT_SYSCALL  NtProtectVirtualMemory;
-    NT_SYSCALL  NtCreateThreadEx;
-    NT_SYSCALL  NtWaitForSingleObject;
+    NT_SYSCALL  NtDelayExecution;
 } NTAPI_FUNC, * PNTAPI_FUNC;
 
 // ASM functions (defined in AsmStub.asm)

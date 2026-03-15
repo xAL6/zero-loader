@@ -180,10 +180,7 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
     if (!FetchNtSyscall(NtProtectVirtualMemory_JOAAT, &pNtApis->NtProtectVirtualMemory))
         return FALSE;
 
-    if (!FetchNtSyscall(NtCreateThreadEx_JOAAT, &pNtApis->NtCreateThreadEx))
-        return FALSE;
-
-    if (!FetchNtSyscall(NtWaitForSingleObject_JOAAT, &pNtApis->NtWaitForSingleObject))
+    if (!FetchNtSyscall(NtDelayExecution_JOAAT, &pNtApis->NtDelayExecution))
         return FALSE;
 
     return TRUE;

@@ -121,27 +121,3 @@ typedef struct _USTRING {
     PVOID   Buffer;
 } USTRING, * PUSTRING;
 
-// PS_ATTRIBUTE for NtCreateThreadEx
-typedef struct _PS_ATTRIBUTE {
-    ULONG_PTR   Attribute;
-    SIZE_T      Size;
-    union {
-        ULONG_PTR Value;
-        PVOID     ValuePtr;
-    };
-    PSIZE_T     ReturnLength;
-} PS_ATTRIBUTE, * PPS_ATTRIBUTE;
-
-typedef struct _PS_ATTRIBUTE_LIST {
-    SIZE_T          TotalLength;
-    PS_ATTRIBUTE    Attributes[1];
-} PS_ATTRIBUTE_LIST, * PPS_ATTRIBUTE_LIST;
-
-typedef struct _OBJECT_ATTRIBUTES2 {
-    ULONG           Length;
-    HANDLE          RootDirectory;
-    PUNICODE_STR    ObjectName;
-    ULONG           Attributes;
-    PVOID           SecurityDescriptor;
-    PVOID           SecurityQualityOfService;
-} OBJECT_ATTRIBUTES2, * POBJECT_ATTRIBUTES2;

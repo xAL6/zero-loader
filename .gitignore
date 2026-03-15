@@ -1,8 +1,10 @@
 Payload.h
 data.enc
+payload.bin
 *.exe
 *.obj
 *.exp
 *.lib
 *.res
 debug.log
+buildlog.txt
