@@ -23,7 +23,6 @@ A CRT-free x64 Windows shellcode loader with polymorphic builds, indirect syscal
 | **Evasion** | Module stomping | Fallback: shellcode planted in `.text` section of signed DLL; memory attributed to legitimate module |
 | **Evasion** | Callback execution | `TpAllocWork`/`TpPostWork` reuses existing thread pool threads; avoids `PsSetCreateThreadNotifyRoutine` kernel callback |
 | **Evasion** | Call stack spoofing | `call rbx` gadget injection in ntdll + tail-call trampoline; clean ntdll-only frames in stack walk |
-| **Evasion** | Sliding execution window | Optional per-page on-demand decryption via VEH; only one cleartext page at any time |
 | **Evasion** | Anti-analysis | PEB debugger flag, `NtGlobalFlag`, CPU count, RDTSC timing |
 | **Evasion** | IAT camouflage | Imports benign APIs via dead-code trick the optimizer cannot eliminate |
 | **Evasion** | Post-execution cleanup | Removes VEH handler, clears debug registers, wipes keys/URLs/nonces from memory |
@@ -54,7 +53,6 @@ Main()
   │   ├─ (fallback 1)          ModuleStomp: overwrite signed DLL .text
   │   └─ (fallback 2)          NtAllocateVirtualMemory + NtProtectVirtualMemory
   ├─ CleanupEvasion()          Remove VEH, clear DR0/DR1, wipe keys/URLs
-  ├─ [ActivateSlidingWindow()] Optional per-page encryption (SLIDING_WINDOW)
   ├─ FindCallGadget()          Find 'call rbx' (FF D3) in ntdll
   ├─ SetSpoofTarget()          Configure ASM trampoline
   ├─ TpAllocWork()             Create thread pool work (callback = SpoofCallback)
@@ -72,7 +70,7 @@ Main()
 ├── AsmStub.asm       x64 MASM stub (SetSSn / RunSyscall / SpoofCallback)
 ├── WinApi.c          PEB walking, API hashing, IAT camouflage, CRT stubs
 ├── Evasion.c         Patchless AMSI/ETW bypass, anti-analysis, cleanup
-├── Stomper.c         Phantom DLL hollowing, module stomping, sliding window
+├── Stomper.c         Phantom DLL hollowing, module stomping, call gadget scanning
 ├── Crypt.c           Chaskey-12 CTR decryption, LZNT1 decompression, key recovery
 ├── Staging.c         HTTPS download with InternetCrackUrlA and self-signed cert bypass
 ├── Common.h          Shared defines, hash constants, typedefs, macros
@@ -102,11 +100,10 @@ This generates:
 
 Edit `Common.h` before building:
 
-| Flag | When to enable |
-|------|----------------|
-| `DEBUG` | Debug logging to `debug.log`, disables anti-analysis |
-| `RWX_SHELLCODE` | Go-based shellcode (Sliver) or anything that writes to its own pages |
-| `SLIDING_WINDOW` | Per-page on-demand decryption (incompatible with `RWX_SHELLCODE`) |
+| Flag | Default | When to change |
+|------|---------|----------------|
+| `DEBUG` | Off | Uncomment for debug logging to `debug.log`, disables anti-analysis |
+| `RWX_SHELLCODE` | Off | Uncomment for Go-based shellcode (Sliver) that writes to its own pages |
 
 ### 3. Build
 
@@ -224,17 +221,6 @@ shellcode RIP          (in phantom/stomped DLL .text)
 
 All frames resolve to legitimate modules. No trace of the loader in the stack.
 
-### Sliding Execution Window (Optional)
-
-When `SLIDING_WINDOW` is defined, only one shellcode page is cleartext at any time:
-
-1. Encrypt all shellcode pages with random per-page XOR keys
-2. Set all pages to `PAGE_NOACCESS`
-3. Register a VEH that catches `ACCESS_VIOLATION` within the shellcode range
-4. VEH decrypts the faulting page, re-encrypts the previous page, resumes execution
-
-Incompatible with `RWX_SHELLCODE` (requires `PAGE_EXECUTE_READ`).
-
 ### Polymorphic String Obfuscation
 
 All 25+ sensitive strings (DLL names, API names, User-Agent) are encoded with a **4-byte rotating XOR key** (`XKEY_0..XKEY_3`) that changes every build. Each key byte is chosen to avoid producing null bytes at its corresponding positions across all strings.
@@ -324,7 +310,7 @@ Post-build step that modifies the compiled binary without affecting functionalit
 
 - [ ] Re-run `Encrypt.py` before every deployment — produces fresh keys, nonce, and string encoding
 - [ ] Re-upload `data.enc` to C2 after re-encryption
-- [ ] Set `RWX_SHELLCODE` for Go/Sliver shellcode, leave disabled for C/ASM implants
+- [ ] For Go/Sliver: uncomment `RWX_SHELLCODE`; for C/ASM implants: leave default (RX)
 - [ ] Customize PE version info in `loader.rc` and `build.bat` (`SET OUTNAME=...`)
 - [ ] No debug output in release mode (default)
 - [ ] No plaintext DLL/API names in binary

