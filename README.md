@@ -10,7 +10,6 @@ Zero CRT. Zero static signatures. Zero trace in the call stack.
 
 ![Arch](https://img.shields.io/badge/arch-x64-0d1117?style=for-the-badge&logo=windows&logoColor=white)
 ![Lang](https://img.shields.io/badge/C_|_MASM-0d1117?style=for-the-badge&logo=c&logoColor=white)
-![Size](https://img.shields.io/badge/~18KB-0d1117?style=for-the-badge)
 ![CRT](https://img.shields.io/badge/CRT--free-0d1117?style=for-the-badge)
 ![License](https://img.shields.io/badge/MIT-0d1117?style=for-the-badge)
 
