@@ -1,10 +1,6 @@
 <div align="center">
 
-```
-┌─┐┌─┐┬─┐┌─┐  ─  ┬  ┌─┐┌─┐┌┬┐┌─┐┬─┐
-┌─┘├┤ ├┬┘│ │     │  │ │├─┤ ││├┤ ├┬┘
-└─┘└─┘┴└─└─┘  ─  ┴─┘└─┘┴ ┴─┴┘└─┘┴└─
-```
+# zero-loader
 
 **Polymorphic x64 shellcode loader**
 
@@ -29,8 +25,6 @@ Zero CRT. Zero static signatures. Zero trace in the call stack.
 ## Overview
 
 Most loaders get flagged because they ship the same binary. **zero-loader** regenerates all cryptographic material on every build — keys, nonces, string encoding, PE metadata. No two compilations share a hash.
-
-**Tested with:** Cobalt Strike, Sliver, Adaptix C2, Metasploit
 
 <br/>
 
