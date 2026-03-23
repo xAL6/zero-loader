@@ -158,7 +158,7 @@ BOOL BruteForceDecryption(
     BYTE b = 0;
 
     while (1) {
-        if (((pProtectedKey[0] ^ b) - 0) == HintByte)
+        if ((pProtectedKey[0] ^ b) == HintByte)
             break;
 
         if (b == 0xFF)

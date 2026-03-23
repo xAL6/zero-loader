@@ -10,7 +10,7 @@ Zero CRT. Zero static signatures. Zero trace in the call stack.
 
 ![Arch](https://img.shields.io/badge/arch-x64-0d1117?style=for-the-badge&logo=windows&logoColor=white)
 ![Lang](https://img.shields.io/badge/C_|_MASM-0d1117?style=for-the-badge&logo=c&logoColor=white)
-![Size](https://img.shields.io/badge/~9KB-0d1117?style=for-the-badge)
+![Size](https://img.shields.io/badge/~18KB-0d1117?style=for-the-badge)
 ![CRT](https://img.shields.io/badge/CRT--free-0d1117?style=for-the-badge)
 ![License](https://img.shields.io/badge/MIT-0d1117?style=for-the-badge)
 
@@ -39,12 +39,12 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 |:--|:--|
 | **Indirect Syscalls** | SSN extraction from ntdll + hooked-stub fallback. 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC |
 | **Patchless AMSI/ETW** | VEH + hardware breakpoints (DR0/DR1) via `NtContinue` — zero bytes modified, passes integrity checks |
-| **Phantom DLL Hollowing** | NTFS transaction → write to section → rollback. EDR sees legitimate DLL-backed memory |
+| **Phantom DLL Hollowing** | Auto-scans System32 for suitable DLL → copies to temp → NTFS transaction → SEC_IMAGE → rollback. EDR sees legitimate DLL-backed memory |
 | **Module Stomping** | Overwrite signed DLL `.text` section. Memory attributed to a Microsoft binary |
 | **Call Stack Spoofing** | `call rbx` gadget in ntdll + thread pool trampoline. All frames resolve to legitimate modules |
 | **Anti-Analysis** | PEB debugger flag, NtGlobalFlag, CPU count, RDTSC timing delta |
 | **IAT Camouflage** | Dead-code benign imports the optimizer cannot eliminate |
-| **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1, wipes keys/URLs/nonces before shellcode execution |
+| **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1/DR7 via `NtContinue`, wipes keys/URLs/nonces before shellcode execution |
 
 > **Crypto & Staging**
 
@@ -170,7 +170,7 @@ Syscalls.h/.c       indirect syscall engine · SSN + gadget pool
 AsmStub.asm         x64 MASM · RunSyscall · SpoofCallback
 WinApi.c            PEB walking · JOAAT hashing · CRT stubs
 Evasion.c           patchless AMSI/ETW · anti-analysis · cleanup
-Stomper.c           phantom hollowing · module stomping · gadgets
+Stomper.c           phantom hollowing (auto DLL scan) · module stomping · gadgets
 Crypt.c             Chaskey-12 CTR · LZNT1 · key recovery
 Staging.c           HTTPS staging · cert bypass
 Common.h            defines · hashes · typedefs · macros

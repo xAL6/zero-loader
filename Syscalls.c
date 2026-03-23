@@ -135,6 +135,8 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
         pNtSyscall->dwSyscallHash = dwSyscallHash;
 
         // --- Extract SSN ---
+        BOOL bSsnFound = FALSE;
+
         if (*((PBYTE)pFuncAddr + 0) == 0x4C &&
             *((PBYTE)pFuncAddr + 1) == 0x8B &&
             *((PBYTE)pFuncAddr + 2) == 0xD1 &&
@@ -145,6 +147,7 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
             BYTE bHigh = *((PBYTE)pFuncAddr + 5);
             BYTE bLow  = *((PBYTE)pFuncAddr + 4);
             pNtSyscall->dwSSn = (bHigh << 8) | bLow;
+            bSsnFound = TRUE;
         }
         else {
             // Search DOWN
@@ -159,12 +162,13 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
                     BYTE bH = *((PBYTE)pNeighbor + 5);
                     BYTE bL = *((PBYTE)pNeighbor + 4);
                     pNtSyscall->dwSSn = ((bH << 8) | bL) - idx;
+                    bSsnFound = TRUE;
                     break;
                 }
             }
 
             // Search UP
-            if (pNtSyscall->dwSSn == 0) {
+            if (!bSsnFound) {
                 for (WORD idx = 1; idx < 255; idx++) {
                     PBYTE pNeighbor = (PBYTE)pFuncAddr - (idx * 0x20);
                     if (*((PBYTE)pNeighbor + 0) == 0x4C &&
@@ -176,6 +180,7 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
                         BYTE bH = *((PBYTE)pNeighbor + 5);
                         BYTE bL = *((PBYTE)pNeighbor + 4);
                         pNtSyscall->dwSSn = ((bH << 8) | bL) + idx;
+                        bSsnFound = TRUE;
                         break;
                     }
                 }
@@ -192,7 +197,7 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
             }
         }
 
-        if (pNtSyscall->dwSSn != 0 && pNtSyscall->pSyscallAddress != NULL)
+        if (bSsnFound && pNtSyscall->pSyscallAddress != NULL)
             return TRUE;
 
         break;

