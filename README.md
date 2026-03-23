@@ -8,17 +8,20 @@ Zero CRT. Zero static signatures. Zero trace in the call stack.
 
 <br/>
 
-[![Arch](https://img.shields.io/badge/arch-x64-0d1117?style=for-the-badge&logo=windows&logoColor=white)](/)
-[![Lang](https://img.shields.io/badge/C_|_MASM-0d1117?style=for-the-badge&logo=c&logoColor=white)](/)
-[![Size](https://img.shields.io/badge/~9KB-0d1117?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHRleHQgeD0iMCIgeT0iMTQiIGZpbGw9IndoaXRlIiBmb250LXNpemU9IjEyIj7wn5ONPC90ZXh0Pjwvc3ZnPg==)](/)
-[![CRT](https://img.shields.io/badge/CRT--free-0d1117?style=for-the-badge)](/)
-[![License](https://img.shields.io/badge/MIT-0d1117?style=for-the-badge)](LICENSE)
-
----
+![Arch](https://img.shields.io/badge/arch-x64-0d1117?style=for-the-badge&logo=windows&logoColor=white)
+![Lang](https://img.shields.io/badge/C_|_MASM-0d1117?style=for-the-badge&logo=c&logoColor=white)
+![Size](https://img.shields.io/badge/~9KB-0d1117?style=for-the-badge)
+![CRT](https://img.shields.io/badge/CRT--free-0d1117?style=for-the-badge)
+![License](https://img.shields.io/badge/MIT-0d1117?style=for-the-badge)
 
 *Every build produces a unique binary — nothing matches across compilations.*
 
 </div>
+
+<br/>
+
+> [!WARNING]
+> This project is intended for authorized security testing, research, and educational purposes only. Unauthorized use against systems you do not own or have explicit permission to test is illegal. The author assumes no liability for misuse.
 
 <br/>
 
@@ -41,7 +44,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **Call Stack Spoofing** | `call rbx` gadget in ntdll + thread pool trampoline. All frames resolve to legitimate modules |
 | **Anti-Analysis** | PEB debugger flag, NtGlobalFlag, CPU count, RDTSC timing delta |
 | **IAT Camouflage** | Dead-code benign imports the optimizer cannot eliminate |
-| **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1, wipes keys/URLs/nonces before beacon runs |
+| **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1, wipes keys/URLs/nonces before shellcode execution |
 
 > **Crypto & Staging**
 
