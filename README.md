@@ -190,16 +190,3 @@ build.bat           Build script (ml64 → cl → Mutate.py)
 
 ---
 
-## OPSEC Notes
-
-- Re-run `Encrypt.py` + `build.bat` before every deployment
-- Re-upload `data.enc` after re-encryption
-- Uncomment `RWX_SHELLCODE` for Go/Sliver, leave default for C/C++ implants
-- Customize `loader.rc` and `build.bat` output name
-- Test in an **offline VM** to avoid sample submission
-
----
-
-<p align="center">
-  Built with <a href="https://claude.ai/code">Claude Code</a>
-</p>
