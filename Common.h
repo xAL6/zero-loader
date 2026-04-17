@@ -18,6 +18,15 @@
 // When not defined: memory is PAGE_EXECUTE_READ (W^X).
 // #define RWX_SHELLCODE
 
+// Opt-in: #9 Draugr MVP synthetic-stack RSP swap. When defined, the
+// loader allocates 1 MB and writes three fake return addresses
+// pointing into ntdll/kernel32, then swaps RSP there before executing
+// shellcode. Default off because (a) the 1 MB private allocation is
+// itself a heuristic signal, and (b) the synthetic frames reuse
+// ntdll/kernel32 .pdata which may under-match at unwind time. Enable
+// only after validating with Moneta / Pe-Sieve / WinDbg stack walk.
+// #define ENABLE_SYNTHETIC_STACK
+
 // Subsystem is controlled by build.bat LFLAGS (/SUBSYSTEM:WINDOWS)
 
 // ----------- Debug Logging -----------

