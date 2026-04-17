@@ -46,7 +46,7 @@
 // ----------- Syscall Name Hashes (Jenkins One-at-a-Time 32-bit) -----------
 #define NtAllocateVirtualMemory_JOAAT   0xE33A06BF
 #define NtProtectVirtualMemory_JOAAT    0x82BB0EE0
-#define NtDelayExecution_JOAAT          0xC4714BC3
+#define NtWaitForSingleObject_JOAAT     0xE2C26E26
 #define NtCreateSection_JOAAT           0x9A538B2B
 #define NtMapViewOfSection_JOAAT        0xD3B060A1
 // ----------- Exit Hook / Elevation (ntdll exports) -----------

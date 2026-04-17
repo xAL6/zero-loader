@@ -226,7 +226,7 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
     } targets[] = {
         { NtAllocateVirtualMemory_JOAAT, &pNtApis->NtAllocateVirtualMemory },
         { NtProtectVirtualMemory_JOAAT,  &pNtApis->NtProtectVirtualMemory  },
-        { NtDelayExecution_JOAAT,        &pNtApis->NtDelayExecution        },
+        { NtWaitForSingleObject_JOAAT,   &pNtApis->NtWaitForSingleObject   },
         { NtCreateSection_JOAAT,         &pNtApis->NtCreateSection         },
         { NtMapViewOfSection_JOAAT,      &pNtApis->NtMapViewOfSection      },
     };
