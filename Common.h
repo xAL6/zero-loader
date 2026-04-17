@@ -183,7 +183,8 @@ extern VOID SetSpoofTarget(PVOID pTarget, PVOID pCallGadget);
 extern VOID SpoofCallback(PVOID Instance, PVOID Context, PVOID Work);
 
 // ----------- Call Gadget Discovery -----------
-PVOID FindCallGadget(IN PVOID pModuleBase);
+BOOL  CollectCallGadgets(VOID);
+PVOID GetRandomCallGadget(VOID);
 
 // ----------- Crypto -----------
 BOOL ChaskeyCtrDecrypt(IN PBYTE pData, IN DWORD dwSize, IN PBYTE pKey, IN PBYTE pNonce);

