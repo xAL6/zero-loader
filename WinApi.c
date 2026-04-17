@@ -122,6 +122,46 @@ INT StrCmpA(IN LPCSTR Str1, IN LPCSTR Str2) {
 }
 
 // -----------------------------------------------
+// Walk PEB to find a loaded module by its upper-case
+// BaseDllName (e.g. L"NTDLL.DLL"). Case-insensitive:
+// compares name byte-by-byte after uppercasing.
+// Used when hash-based lookup isn't reliable due to
+// per-system casing differences.
+// -----------------------------------------------
+PVOID FindLoadedModuleW(IN PCWSTR szUpperName) {
+
+    PPEB2 pPeb = (PPEB2)__readgsqword(0x60);
+    if (!pPeb || !pPeb->Ldr)
+        return NULL;
+
+    SIZE_T nameLen = 0;
+    while (szUpperName[nameLen]) nameLen++;
+    USHORT wantBytes = (USHORT)(nameLen * sizeof(WCHAR));
+
+    PLIST_ENTRY pHead  = &pPeb->Ldr->InLoadOrderModuleList;
+    PLIST_ENTRY pEntry = pHead->Flink;
+
+    while (pEntry != pHead) {
+        PLDR_DT_TABLE_ENTRY pDte = (PLDR_DT_TABLE_ENTRY)pEntry;
+
+        if (pDte->BaseDllName.Buffer && pDte->BaseDllName.Length == wantBytes) {
+            SIZE_T j;
+            for (j = 0; j < nameLen; j++) {
+                WCHAR c = pDte->BaseDllName.Buffer[j];
+                if (c >= L'a' && c <= L'z') c -= 32;
+                if (c != szUpperName[j]) break;
+            }
+            if (j == nameLen)
+                return pDte->DllBase;
+        }
+
+        pEntry = pEntry->Flink;
+    }
+
+    return NULL;
+}
+
+// -----------------------------------------------
 // Fetch module base by walking PEB (hash-based)
 // -----------------------------------------------
 PVOID FetchModuleBaseAddr(IN UINT32 dwModuleNameHash) {
@@ -203,45 +243,7 @@ PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash) {
 // -----------------------------------------------
 BOOL InitializeWinApis(OUT PAPI_HASHING pApi) {
 
-    // Hash of L"KERNEL32.DLL" (wide, case-sensitive as loaded)
-    // We need to find kernel32 by walking PEB
-    PPEB2 pPeb = (PPEB2)__readgsqword(0x60);
-    if (!pPeb || !pPeb->Ldr)
-        return FALSE;
-
-    PVOID pKernel32 = NULL;
-
-    // Walk loaded modules to find kernel32
-    PLIST_ENTRY pHead  = &pPeb->Ldr->InLoadOrderModuleList;
-    PLIST_ENTRY pEntry = pHead->Flink;
-
-    while (pEntry != pHead) {
-        PLDR_DT_TABLE_ENTRY pDte = (PLDR_DT_TABLE_ENTRY)pEntry;
-
-        if (pDte->BaseDllName.Buffer != NULL && pDte->BaseDllName.Length > 0) {
-            // Case-insensitive check for kernel32.dll
-            WCHAR wName[64] = { 0 };
-            SIZE_T len = pDte->BaseDllName.Length / sizeof(WCHAR);
-            if (len < 64) {
-                for (SIZE_T j = 0; j < len; j++) {
-                    WCHAR c = pDte->BaseDllName.Buffer[j];
-                    wName[j] = (c >= L'a' && c <= L'z') ? (c - 32) : c;
-                }
-                wName[len] = 0;
-
-                // Check for "KERNEL32.DLL"
-                if (wName[0] == L'K' && wName[1] == L'E' && wName[2] == L'R' &&
-                    wName[3] == L'N' && wName[4] == L'E' && wName[5] == L'L' &&
-                    wName[6] == L'3' && wName[7] == L'2') {
-                    pKernel32 = pDte->DllBase;
-                    break;
-                }
-            }
-        }
-
-        pEntry = pEntry->Flink;
-    }
-
+    PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
     if (!pKernel32)
         return FALSE;
 

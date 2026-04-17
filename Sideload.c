@@ -38,40 +38,6 @@ static HINSTANCE g_hDll   = NULL;
 #ifdef REQUIRE_ELEVATION
 
 // -----------------------------------------------
-// Find kernel32 base via PEB (case-insensitive)
-// Same approach as InitializeWinApis in WinApi.c
-// -----------------------------------------------
-static PVOID FindKernel32(VOID) {
-    PPEB2 pPeb = (PPEB2)__readgsqword(0x60);
-    if (!pPeb || !pPeb->Ldr)
-        return NULL;
-
-    PLIST_ENTRY pHead  = &pPeb->Ldr->InLoadOrderModuleList;
-    PLIST_ENTRY pEntry = pHead->Flink;
-
-    while (pEntry != pHead) {
-        PLDR_DT_TABLE_ENTRY pDte = (PLDR_DT_TABLE_ENTRY)pEntry;
-        if (pDte->BaseDllName.Buffer && pDte->BaseDllName.Length > 0) {
-            SIZE_T len = pDte->BaseDllName.Length / sizeof(WCHAR);
-            if (len == 12) {    // "kernel32.dll" = 12 chars
-                WCHAR wUp[16] = { 0 };
-                for (SIZE_T j = 0; j < len; j++) {
-                    WCHAR c = pDte->BaseDllName.Buffer[j];
-                    wUp[j] = (c >= L'a' && c <= L'z') ? (c - 32) : c;
-                }
-                if (wUp[0] == L'K' && wUp[1] == L'E' && wUp[2] == L'R' &&
-                    wUp[3] == L'N' && wUp[4] == L'E' && wUp[5] == L'L' &&
-                    wUp[6] == L'3' && wUp[7] == L'2') {
-                    return pDte->DllBase;
-                }
-            }
-        }
-        pEntry = pEntry->Flink;
-    }
-    return NULL;
-}
-
-// -----------------------------------------------
 // Check if current process is running elevated
 // Uses ntdll-only APIs (no advapi32 dependency)
 // -----------------------------------------------
@@ -110,7 +76,7 @@ static BOOL IsElevated(VOID) {
 // -----------------------------------------------
 static BOOL RelaunchElevated(VOID) {
     // Find kernel32 for LoadLibraryA + GetModuleFileNameA
-    PVOID pKernel32 = FindKernel32();
+    PVOID pKernel32 = FindLoadedModuleW(L"KERNEL32.DLL");
     if (!pKernel32)
         return FALSE;
 
@@ -215,35 +181,8 @@ BOOL WINAPI DllMain(HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved) {
     if (dwReason != DLL_PROCESS_ATTACH)
         return TRUE;
 
-    // --- Find ntdll base via PEB ---
-    PPEB2 pPeb = (PPEB2)__readgsqword(0x60);
-    if (!pPeb || !pPeb->Ldr)
-        return TRUE;
-
-    PLIST_ENTRY pHead  = &pPeb->Ldr->InLoadOrderModuleList;
-    PLIST_ENTRY pEntry = pHead->Flink;
-
-    while (pEntry != pHead) {
-        PLDR_DT_TABLE_ENTRY pDte = (PLDR_DT_TABLE_ENTRY)pEntry;
-        if (pDte->BaseDllName.Buffer && pDte->BaseDllName.Length > 0) {
-            SIZE_T len = pDte->BaseDllName.Length / sizeof(WCHAR);
-            if (len == 9) {
-                WCHAR wUp[16] = { 0 };
-                for (SIZE_T j = 0; j < len; j++) {
-                    WCHAR c = pDte->BaseDllName.Buffer[j];
-                    wUp[j] = (c >= L'a' && c <= L'z') ? (c - 32) : c;
-                }
-                if (wUp[0] == L'N' && wUp[1] == L'T' && wUp[2] == L'D' &&
-                    wUp[3] == L'L' && wUp[4] == L'L' && wUp[5] == L'.' &&
-                    wUp[6] == L'D' && wUp[7] == L'L' && wUp[8] == L'L') {
-                    g_pNtdll = pDte->DllBase;
-                    break;
-                }
-            }
-        }
-        pEntry = pEntry->Flink;
-    }
-
+    // --- Find ntdll base via PEB (case-insensitive) ---
+    g_pNtdll = FindLoadedModuleW(L"NTDLL.DLL");
     if (!g_pNtdll)
         return TRUE;
 

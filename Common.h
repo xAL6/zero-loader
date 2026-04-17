@@ -152,9 +152,11 @@ SIZE_T StrLenW(IN LPCWSTR String);
 INT    StrCmpA(IN LPCSTR Str1, IN LPCSTR Str2);
 
 // ----------- WinApi Resolution -----------
-BOOL InitializeWinApis(OUT PAPI_HASHING pApi);
+BOOL  InitializeWinApis(OUT PAPI_HASHING pApi);
 PVOID FetchModuleBaseAddr(IN UINT32 dwModuleNameHash);
 PVOID FetchExportAddress(IN PVOID pModuleBase, IN UINT32 dwApiNameHash);
+// Case-insensitive PEB walk by exact upper-case BaseDllName (e.g. L"NTDLL.DLL").
+PVOID FindLoadedModuleW(IN PCWSTR szUpperName);
 
 // ----------- IAT Camouflage -----------
 VOID IatCamouflage(VOID);
