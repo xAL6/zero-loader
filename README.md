@@ -90,6 +90,28 @@ build.bat uac                              # EXE with UAC manifest
 > Re-run steps 1 & 2 for a completely new binary.
 
 <details>
+<summary><b>Web Console (optional)</b></summary>
+
+<br/>
+
+A browser-based wrapper for the three CLI steps above (encrypt / sideload /
+build). Runs on `127.0.0.1` only — no auth, not meant to be exposed to a
+network.
+
+```bash
+cd web
+run.bat            # first run creates .venv and installs Flask
+                   # then starts http://127.0.0.1:7890
+```
+
+The console streams `build.bat` output live, shows per-section entropy from
+`Mutate.py`, and exposes every compile-time flag (`DEBUG`, `RWX_SHELLCODE`,
+`ENABLE_SYNTHETIC_STACK`, `uac`) as a checkbox. Built artifacts appear in the
+sidebar with one-click download.
+
+</details>
+
+<details>
 <summary><b>DLL Sideloading</b></summary>
 
 <br/>
