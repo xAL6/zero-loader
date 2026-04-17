@@ -36,14 +36,17 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 
 | | |
 |:--|:--|
-| **Indirect Syscalls** | SSN extraction from ntdll + hooked-stub fallback. 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC |
+| **Indirect Syscalls** | SSN sourced from a clean `\KnownDlls\ntdll.dll` section (defeats userland hooks on ntdll). 64 `syscall;ret` gadgets pooled, randomly selected per call via RDTSC. Hooked-stub fallback for neighbour-SSN recovery |
 | **Patchless AMSI/ETW** | VEH + hardware breakpoints (DR0/DR1) via `NtContinue` — zero bytes modified, passes integrity checks |
 | **Phantom DLL Hollowing** | Auto-scans System32 for suitable DLL → copies to temp → NTFS transaction → SEC_IMAGE → rollback. EDR sees legitimate DLL-backed memory |
-| **Module Stomping** | Overwrite signed DLL `.text` section. Memory attributed to a Microsoft binary |
-| **Call Stack Spoofing** | `call rbx` gadget in ntdll + thread pool trampoline. All frames resolve to legitimate modules |
+| **Module Stomping + `.pdata`** | Overwrite signed DLL `.text` with shellcode, then register a synthetic `RUNTIME_FUNCTION` via `RtlAddFunctionTable`. Defeats Elastic 8.11+ kernel ETW callstack validation that flags stomped regions with no `.pdata` entry |
+| **Poison Fiber Kick-off** | Primary execution path is `ConvertThreadToFiber` + `SwitchToFiber` on the main thread — no new OS thread, so `PsSetCreateThreadNotifyRoutine` never fires. Thread-pool fallback if fiber APIs unavailable |
+| **Multi-module Call Stack Spoofing** | `FF D3` (call rbx) gadgets pooled from ntdll / kernel32 / kernelbase (up to 64); per-run RDTSC pick defeats "single return-address frequency" heuristics. All frames resolve to legitimate modules |
+| **Wait:UserRequest keep-alive** | Alertable `NtWaitForSingleObject(NtCurrentProcess)` instead of `NtDelayExecution`, so the thread's `WaitReason` reads `UserRequest` — beats Hunt-Sleeping-Beacons / BeaconHunter fingerprints |
 | **Anti-Analysis** | PEB debugger flag, NtGlobalFlag, CPU count, RDTSC timing delta |
 | **IAT Camouflage** | Dead-code benign imports the optimizer cannot eliminate |
 | **Blind DLL Notifications** | Walks and unlinks all EDR `LdrRegisterDllNotification` callbacks — subsequent `LoadLibrary` invisible |
+| **DLL preload shuffle** | After blinding, amsi/wininet/ktmw32 are preloaded in a RDTSC-seeded Fisher-Yates order so the remaining kernel-ETW image-load sequence is unpredictable |
 | **Exit Hook** | Patches `RtlExitUserProcess` with PAUSE loop — prevents host exit from killing C2 (DLL sideload) |
 | **Post-Exec Cleanup** | Removes VEH, clears DR0/DR1/DR7 via `NtContinue`, wipes keys/URLs/nonces before shellcode execution |
 
@@ -55,6 +58,7 @@ Most loaders get flagged because they ship the same binary. **zero-loader** rege
 | **LZNT1 Compression** | Compressed before encryption, decompressed at runtime via ntdll |
 | **Polymorphic Strings** | 4-byte rotating XOR across 25+ strings, keys regenerated every build |
 | **PE Mutation** | TimeDateStamp, Rich header, section padding, checksum — randomized post-build |
+| **Entropy Balancing** | Section padding filled with natural-language strings (API names, HTTP headers, lorem ipsum) so overall section entropy stays in the 4.5-6.5 bit/byte range, dodging Defender ML / ESET / Sophos high-entropy heuristics |
 | **HTTPS Staging** | Dynamic WinINet + `InternetCrackUrlA` + self-signed cert bypass |
 | **W^X Memory** | `PAGE_EXECUTE_READ` default. `RWX_SHELLCODE` flag for Go-based implants |
 
@@ -122,6 +126,7 @@ Edit `Common.h` or pass via `build.bat`:
 | `RWX_SHELLCODE` | Off | `PAGE_EXECUTE_READWRITE` for Go/Sliver |
 | `BUILD_DLL` | Off | DLL sideload build (set by `build.bat sideload`) |
 | `REQUIRE_ELEVATION` | Off | Self-relaunch UAC for DLL sideload (`build.bat sideload ... uac`) |
+| `ENABLE_SYNTHETIC_STACK` | Off | Swap RSP to a 1 MB synthetic stack with three fake ntdll/kernel32 return addresses before shellcode runs (Draugr MVP). Disabled by default — the heap allocation and borrowed `.pdata` coverage are themselves heuristic signals; enable only after validating with Moneta / Pe-Sieve / WinDbg stack-walk in the target environment |
 
 </details>
 
@@ -147,8 +152,12 @@ Main()
  │
  ├─ IatCamouflage              pad IAT with benign imports
  ├─ AntiAnalysis               PEB · NtGlobalFlag · RDTSC
- ├─ InitializeNtSyscalls       SSN extraction + 64 gadget pool
- ├─ InitializeWinApis          PEB walk → kernel32 → JOAAT resolve
+ ├─ InitializeNtSyscalls       single-pass export scan
+ │                              └ SwitchToCleanNtdll (\KnownDlls\ntdll.dll)
+ │                              └ 64-entry syscall;ret gadget pool
+ ├─ InitializeWinApis          FindLoadedModuleW → kernel32 → JOAAT resolve
+ ├─ BlindDllNotifications      unlink LdrRegisterDllNotification entries
+ ├─ ShufflePreloadLibraries    Fisher-Yates (RDTSC) amsi/wininet/ktmw32
  ├─ PatchlessAmsiEtw           DR0 = EtwEventWrite
  │                              DR1 = AmsiScanBuffer
  ├─ BruteForceDecryption       recover Chaskey key
@@ -157,14 +166,20 @@ Main()
  ├─ DecompressPayload          LZNT1 via RtlDecompressBuffer
  │
  ├─ ┌ PhantomDllHollow ─────── NTFS txn → SEC_IMAGE → rollback
- ├─ │ ModuleStomp ──────────── overwrite signed DLL .text
+ ├─ │ ModuleStomp ──────────── overwrite .text + RtlAddFunctionTable
  ├─ └ NtAllocateVirtualMemory  private RW → RX  (last resort)
  │
  ├─ CleanupEvasion             wipe VEH · DR regs · keys · URLs
- ├─ FindCallGadget             FF D3 (call rbx) in ntdll
+ ├─ CollectCallGadgets         pool FF D3 from ntdll/kernel32/kernelbase
+ ├─ GetRandomCallGadget        RDTSC pick
  ├─ SetSpoofTarget             configure ASM trampoline
- ├─ TpAllocWork / TpPostWork   thread pool execution
- └─ NtDelayExecution           keep-alive via indirect syscall
+ ├─ [opt] BuildSyntheticStack  1 MB fake stack · 3 ntdll/k32 anchors
+ │
+ ├─ ConvertThreadToFiber       primary: Poison Fiber on main thread
+ ├─ CreateFiber(SpoofCallback)
+ └─ SwitchToFiber              never returns — shellcode runs on fiber
+       ↳ fallback if fiber APIs unavailable:
+         TpAllocWork / TpPostWork + alertable NtWaitForSingleObject
 ```
 
 ### DLL Sideload Flow
@@ -185,15 +200,28 @@ Host EXE loads proxy DLL → DllMain
 
 ### Call Stack
 
+Default (Poison Fiber path):
+
 ```
- RIP  shellcode           ← phantom/stomped DLL .text (signed)
-  ↓   call rbx gadget     ← ntdll
-  ↓   TppWorkpExecute     ← ntdll
-  ↓   TppWorkerThread     ← ntdll
-  ↓   RtlUserThreadStart  ← ntdll
+ RIP  shellcode           ← phantom/stomped DLL .text
+  ↓   call rbx gadget     ← ntdll / kernel32 / kernelbase (randomized)
+  ↓   fiber entry frame   ← fiber-allocated stack
 ```
 
-Every frame resolves to a legitimate module.
+With `ENABLE_SYNTHETIC_STACK` the fiber stack is replaced by a
+pre-built synthetic chain:
+
+```
+ RIP  shellcode                    ← phantom/stomped DLL .text
+  ↓   call-gadget return           ← ntdll / kernel32 / kernelbase
+  ↓   NtWaitForSingleObject + 0x20 ← ntdll
+  ↓   RtlUserThreadStart    + 0x20 ← ntdll
+  ↓   BaseThreadInitThunk   + 0x20 ← kernel32
+```
+
+Stomped regions carry a synthetic `RUNTIME_FUNCTION` registered
+via `RtlAddFunctionTable`, so `RtlLookupFunctionEntry(rip)` returns
+a valid handle and the stackwalker can unwind each frame.
 
 ### Encryption Pipeline
 
