@@ -49,6 +49,8 @@
 #define NtWaitForSingleObject_JOAAT     0xE2C26E26
 #define NtCreateSection_JOAAT           0x9A538B2B
 #define NtMapViewOfSection_JOAAT        0xD3B060A1
+// Used only for bootstrap — clean-ntdll section mapping
+#define NtOpenSection_JOAAT             0x6EC52BCD
 // ----------- Exit Hook / Elevation (ntdll exports) -----------
 #define RtlExitUserProcess_JOAAT        0x3DC05538
 #define LdrAddRefDll_JOAAT              0x807ED758

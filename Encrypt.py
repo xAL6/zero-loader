@@ -62,6 +62,8 @@ OBFUSCATED_STRINGS = {
     # Evasion.c (DLL notification callback removal — EDR blinding)
     "XSTR_LDR_REG_DLL_NOTIF":      "LdrRegisterDllNotification",
     "XSTR_LDR_UNREG_DLL_NOTIF":    "LdrUnregisterDllNotification",
+    # Syscalls.c (clean ntdll via \KnownDlls\ntdll.dll section)
+    "XSTR_KNOWNDLLS_NTDLL":        "\\KnownDlls\\ntdll.dll",
 }
 
 

